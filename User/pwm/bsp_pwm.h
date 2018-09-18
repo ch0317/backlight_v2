@@ -21,6 +21,6 @@
 #define            PWM_3D_TIM_CH3N_PIN           GPIO_Pin_15
 
 void ADVANCE_TIM_Init(void);
-void ADVANCE_TIM_Mode_Config(int pwm_frequency, int duty);
+void ADVANCE_TIM_Mode_Config(int duty_2d,int duty_3d);
 
 #endif

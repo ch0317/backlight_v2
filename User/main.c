@@ -7,38 +7,131 @@
 #include "./i2c/bsp_i2c_gpio.h"
 #include "./i2c/bsp_i2c_ee.h"
 
-
-
+//#define END_FLAG '$'
 #define CR '\r'
 #define LF '\n'
 #define CRLF "\r\n"
 
-#define COMMAND_MAX_LENGTH 32
-
+#define COMMAND_MAX_LENGTH 128
+enum CMD_ID{
+    CMD_NULL,
+    HELP = 1,
+    INFO,
+    DUMP,
+    I2CREAD,
+    I2CWRITE,
+    BLSETBRIGHTNESS,
+    BLSETRATIOS,
+    BLSWITCH,
+    BLSETTINGSGET,
+    BLSET2DCURRENT,
+    BLSET3DCURRENT,
+    BLSETPWM,
+    POKE32,
+    PEEK32,
+    POKE16,
+    PEEK16,
+    POKE8,
+    PEEK8,
+    GPIOREAD,
+    GPIOREADPIN,
+    GPIOSETPIN,
+    GPIOCLRPIN,
+    UNKNOWCMD = 0xff,
+};
 
 // messages
-#define UNKNOWN_COMMAND "unknown command"
-#define COMMAND_TOO_LONG "command too long"
-#define WRONG_COMMAND "wrong command format, please check!"
-
+#define UNKNOWN_COMMAND  "[ERROR]unknown command"
+#define COMMAND_TOO_LONG "[ERROR]command too long"
+#define WRONG_FORMAT     "[ERROR]wrong fomart,see HELP"
 
 //内部flash写入的起始地址与结束地址
 #define WRITE_START_ADDR  ((uint32_t)0x08008000)
 #define WRITE_END_ADDR    ((uint32_t)0x0800C000)
 
-#define FLASH_PAGE_SIZE    ((uint16_t)0x400)	//1024
-#define PAGE_ADDR(n)   (0x08000000 + n*1024)
+#define FLASH_PAGE_SIZE   ((uint16_t)0x400) //1024
+#define PAGE_ADDR(n)      (0x08000000 + n*1024)
 
-//存在flash中的变量地址
-#define BRIGHTNESS_ADDR     PAGE_ADDR(7)         //亮度
-#define MODE_ADDR           (PAGE_ADDR(7) + 2)   //模式
-#define CURRENT_ADDR        (PAGE_ADDR(7) + 4)   //电流
+#define DUTY_MAX_3D 1024
 
-#define brightness_index 0
-#define mode_index 1
-#define current_index 2
-uint16_t para_array[3];
+//tokens for cmd analysis
+char *g_tokens[5];
+char cmd_buffer[COMMAND_MAX_LENGTH];
+char g_usart_buf[COMMAND_MAX_LENGTH];
+int cmd_received = 0;
+unsigned short usart_buf_length=0;
+char cmd_help_str[1024] =   "HELP -- Display all commands\r\n" \
+                            "INFO -- Display Board Information\r\n" \
+                            "DUMP -- Dump 8556 register\r\n" \
+                            "I2CREAD  <uint8_addr>               -- Read 8556 reg with i2c\r\n" \
+                            "I2CWRITE <uint8_addr> <uint8_value> -- Write 8556 reg with i2c\r\n" \
+                            "BLSETBRIGHTNESS  <Brightness 0-255> -- default 102\r\n" \
+                            "BLSETRATIOS <Mode 2 or 3>  <RATIO_2D 0.00-1.00>  <RATIO_3D 0.00-3.00>\r\n" \
+                            "BLSWITCH    <Mode 2 or 3>\r\n" \
+                            "BLSETPWM    <2 or 3> <Duty cycle 0.00-100.00%>\r\n" \
+                            "BLSET2DCURRENT  <0.00-25.00mA>\r\n" \
+                            "BLSET3DCURRENT  <0.00-14.00mA>\r\n" \
+                            "BLSETTINGSGET\r\n" \
+                            "POKE32 <Address> <Data>\r\n" \
+                            "POKE16 <Address> <Data>\r\n" \
+                            "POKE8  <Address> <Data>\r\n" \
+                            "PEEK32 <Address>\r\n" \
+                            "PEEK16 <Address>\r\n" \
+                            "PEEK8  <Address>\r\n" \
+                            "GPIOREAD    <port>\r\n" \
+                            "GPIOREADPIN <port> <pin>\r\n" \
+                            "GPIOSETPIN  <port> <pin>\r\n" \
+                            "GPIOCLRPIN  <port> <pin>\r\n";
 
+#define mode_index 0
+#define brightness_index 1
+#define mode2ratio2d_index 2
+#define mode2ratio3d_index 3
+#define mode3ratio2d_index 4
+#define mode3ratio3d_index 5
+
+/*[0]mode, 
+  [1]brightness, 
+  [2]mode2ratio2d(0.00~1.00,default:1.0,map to 1~100 in memory), 
+  [3]mode2ratio3d(0.00~3.00,default:0.15,map to 1~300 in memory), 
+  [4]mode3ratio2d(0.00~1.00,default:0,map to 1~100 in memory), 
+  [5]mode3ratio3d(0.00~3.00,default:1.0,map to 1~300 in memory),
+*/
+static uint32_t g_setting[6] = {2,0,100,15,0,100}; 
+
+
+
+int cmd_id = CMD_NULL;
+int cmd_key_num = 0;
+static unsigned char i2c_init_table[][2] = {
+    {0xa1, 0x7F},  //hight bit(8~11)(0~0X66e set backlight)
+    {0xa0, 0x66},  //low bit(0~7)  20mA
+    {0x16, 0x3F},  //5channel LED enable 0x1F
+    {0xa9, 0xa0},  //VBOOST_MAX 25V
+    {0x9e, 0x22},  //VBOOST_RANGE
+    {0xa2, 0x2b},  //BOOST_FSET_EN PWM_FSET_EN 
+    {0xa6, 0x47},  //VBOOST 
+    {0x01, 0x05},  //0x03 pwm+I2c set brightness,0x5 I2c set brightness
+    {0xff, 0xff},  //ending flag
+};
+
+#if 0
+static unsigned char i2c_init_table[][2] = {
+    {0xa1, 0x7F},  //hight bit(8~11)(0~0X66e set backlight)
+    {0xa0, 0x66},  //low bit(0~7)  20mA
+    {0x16, 0x3F},  // 5channel LED enable 0x1F
+    {0xa9, 0xc0},  //VBOOST_MAX 25V
+    {0x9e, 0x22},  //VBOOST_RANGE
+    {0xa2, 0x2b},  //BOOST_FSET_EN PWM_FSET_EN 
+    {0xa6, 0x07},    //VBOOST 0.42*11
+    {0x01, 0x05},  //0x03 pwm+I2c set brightness,0x5 I2c set brightness
+    {0xff, 0xff},  //ending flag
+};
+#endif
+void get_flash_setting(void);
+void save_setting_in_flash(void);
+void set_flash_tag(void);
+void set_sys_brightness(uint8_t brightness);
 
 // send one byte through USART
 void usart_send(const char chr) {
@@ -64,331 +157,125 @@ void usart_send_line(const char *s) {
 }
 
 
-void get_flash_para()
-{
-	para_array[brightness_index] = *((uint8_t*)BRIGHTNESS_ADDR);
-	para_array[mode_index] = *((uint8_t*)MODE_ADDR);
-	para_array[current_index] = *((uint8_t*)CURRENT_ADDR);
-	
+void command_parse() {
+
+    int i = 0;
+    printf("CMD:%s\r\n",g_usart_buf);
+    memset(g_tokens,0,5 * sizeof(char *));
+    
+    for (char *p = strtok(g_usart_buf," "); p != NULL; p = strtok(NULL, " "))
+    {
+        g_tokens[i] = p;
+        //printf("CMD KEY:%s\t",g_tokens[i]);
+        i++;
+        cmd_key_num = i;
+    }
+		//printf("CMD KEY:%s\t",g_tokens[0]);
+    //printf("\n");
+    
+    if(!strncmp(g_tokens[0],"HELP",strlen("HELP")))
+    {
+        cmd_id = HELP;
+    }
+    else if(!strncmp(g_tokens[0],"INFO",strlen("INFO")))
+    {
+        cmd_id = INFO;
+    }
+    else if(!strncmp(g_tokens[0],"DUMP",strlen("DUMP")))
+    {
+        cmd_id = DUMP;
+    }
+    else if(!strncmp(g_tokens[0],"I2CREAD",strlen("I2CREAD")))
+    {
+        cmd_id = I2CREAD;
+    }
+    else if(!strncmp(g_tokens[0],"I2CWRITE",strlen("I2CWRITE")))
+    {
+        cmd_id = I2CWRITE;
+    }
+    else if(!strncmp(g_tokens[0],"BLSETBRIGHTNESS",strlen("BLSETBRIGHTNESS")))
+    {
+        cmd_id = BLSETBRIGHTNESS;
+    }
+    else if(!strncmp(g_tokens[0],"BLSETRATIOS",strlen("BLSETRATIOS")))
+    {
+        cmd_id = BLSETRATIOS;
+    }
+    else if(!strncmp(g_tokens[0],"BLSWITCH",strlen("BLSWITCH")))
+    {
+        cmd_id = BLSWITCH;
+    }
+    else if(!strncmp(g_tokens[0],"BLSETTINGSGET",strlen("BLSETTINGSGET")))
+    {
+        cmd_id = BLSETTINGSGET;
+    }
+    else if(!strncmp(g_tokens[0],"BLSET2DCURRENT",strlen("BLSET2DCURRENT")))
+    {
+        cmd_id = BLSET2DCURRENT;
+    }
+    else if(!strncmp(g_tokens[0],"BLSET3DCURRENT",strlen("BLSET3DCURRENT")))
+    {
+        cmd_id = BLSET3DCURRENT;
+    }
+    else if(!strncmp(g_tokens[0],"POKE32",strlen("POKE32")))
+    {
+        cmd_id = POKE32;
+    }
+    else if(!strncmp(g_tokens[0],"POKE16",strlen("POKE16")))
+    {
+        cmd_id = POKE16;
+    }
+    else if(!strncmp(g_tokens[0],"POKE8",strlen("POKE8")))
+    {
+        cmd_id = POKE8;
+    }
+    else if(!strncmp(g_tokens[0],"PEEK32",strlen("PEEK32")))
+    {
+        cmd_id = PEEK32;
+    }
+    else if(!strncmp(g_tokens[0],"PEEK16",strlen("PEEK16")))
+    {
+        cmd_id = PEEK16;
+    }
+    else if(!strncmp(g_tokens[0],"PEEK8",strlen("PEEK8")))
+    {
+        cmd_id = PEEK8;
+    }
+    else if(!strncmp(g_tokens[0],"GPIOREAD",strlen("GPIOREAD")))
+    {
+        cmd_id = GPIOREAD;
+    }
+    else if(!strncmp(g_tokens[0],"GPIOREADPIN",strlen("GPIOREADPIN")))
+    {
+        cmd_id = GPIOREADPIN;
+    }
+    else if(!strncmp(g_tokens[0],"GPIOSETPIN",strlen("GPIOSETPIN")))
+    {
+        cmd_id = GPIOSETPIN;
+    }
+    else if(!strncmp(g_tokens[0],"GPIOCLRPIN",strlen("GPIOCLRPIN")))
+    {
+        cmd_id = GPIOCLRPIN;
+    }
+    else
+    {
+        cmd_id = UNKNOWCMD;
+    }
 }
 
 
-void last_setting_get()
-{
-		//将flash中的值通过i2c写入8556
-		uint16_t mode_in_flash = *(uint16_t*)(MODE_ADDR);
-		uint8_t mode = (uint8_t)mode_in_flash;
-		uint16_t brightness_in_flash = *(uint16_t*)(BRIGHTNESS_ADDR);
-		uint8_t brightness = (uint8_t)brightness_in_flash;
-		uint16_t current_in_flash = *(uint16_t*)(CURRENT_ADDR);
-		uint8_t current = (uint8_t)current_in_flash;
-	
-		ee_WRITE_BYTES(BRIGHTNESS_CONTROL,&brightness,1);
-		
-	
-		uint8_t mode_mask = 0xff;
-		mode_mask = mode_mask & (mode << 1);
-		
-		uint8_t device_control = 0;
-		ee_READ_BYTES(DEVICE_CONTROL,&device_control,1);
-		
-		printf("\r\ndevice_control_register:%d\r\n",device_control);
-		device_control = device_control & mode_mask;   //set BRT_MODE
-		
-		ee_WRITE_BYTES(DEVICE_CONTROL,&device_control,1);
-		ee_WRITE_BYTES(CFG0,&current,1);
-		
-}
-
-/*
-CMD TO HANDLE:
-	COMMANDLINE_PRINTF("BL2DINIT <Brightness 0-255>\n");
-
-	COMMANDLINE_PRINTF("BLSWITCH <Mode>\n");
-	COMMANDLINE_PRINTF("BKL_SWITCH <Mode>\n");
-	COMMANDLINE_PRINTF("BLSETTINGGET - turn on last saved backlight with saved or default settings\n");
-	COMMANDLINE_PRINTF("BLSETMODE0\n");
-	COMMANDLINE_PRINTF("BLSETMODE1\n");
-
-*/
-
-void handle_command(char *command) {
-
-	char *tokens[5];
-	int i = 0;
-	int ret = 0;
-	
-	
-	for (char *p = strtok(command," "); p != NULL; p = strtok(NULL, " "))
-	{
-		tokens[i] = p;
-		
-		printf("token[%d]:%s\t",i,tokens[i]);
-		i++;
-	}
-	printf("\n");
-	
-	if(!strncmp(tokens[0],"BL2DINIT",strlen("BL2DINIT")))
-	{
-		if(i != 2)
-		{
-			usart_send_line(WRONG_COMMAND);
-			usart_send_line("format:BL2DINIT <Brightness 0-255>, example: BL2DINIT 128");
-			return;
-		}
-		
-		int ibrightness = atoi(tokens[1]);
-		uint8_t ibrightness_read = 0;
-		if(ibrightness < 0 || ibrightness > 255)
-		{
-			usart_send_line("ibrightness wrong, range is 0~255");
-			return;
-		}
-		
-		uint8_t brightness = (uint8_t)ibrightness;
-		
-		printf("\r\nbrightness:%d\r\n",brightness);
-		
-		ret = ee_WRITE_BYTES(BRIGHTNESS_CONTROL,&brightness,1);
-
-		ret = ee_READ_BYTES(BRIGHTNESS_CONTROL,&ibrightness_read,1);
-
-		if(brightness == ibrightness_read)
-		{
-			usart_send_line("set success!");
-		}
-		printf("ibrightness_read=%d\n",ibrightness_read);
-		
-	}
-	/*
-	else if(!strncmp(tokens[0],"BL3DINIT",strlen("BL3DINIT")))
-	{
-		if(i != 3)
-		{
-			usart_send_line(WRONG_COMMAND);
-			usart_send_line("format: BL3DINIT <Brightness 0-255> <Current 5-30mA>, example: BL3DINIT 128 5");
-			return;
-		}
-		
-		int ibrightness = atoi(tokens[1]);
-		uint8_t brightness = (uint8_t)ibrightness;
-		if(ibrightness < 0 || ibrightness > 255)
-		{
-			usart_send_line("ibrightness wrong, range is 0~255");
-			return;
-		}
-		
-		int icurrent = atoi(tokens[2]);
-		if(icurrent < 5 || icurrent > 30)
-		{
-			usart_send_line("icurrent wrong, range is 5~30");
-			return;
-		}
-		
-		uint8_t current = (uint8_t)icurrent;
-		printf("\r\nbrightness:%d,current:%d\r\n",brightness,current);
-		 
-		ret = ee_WRITE_BYTES(BRIGHTNESS_CONTROL_ADDRESS,&brightness,1);
-		ret |= ee_WRITE_BYTES(CFG0,&current,1);
-		printf("write ret=%d\n",ret);
-		uint8_t current_read = 0;
-		uint8_t brightness_read = 0;
-		ret = ee_READ_BYTES(BRIGHTNESS_CONTROL_ADDRESS,&brightness_read,1);
-		ret = ee_READ_BYTES(CFG0,&current_read,1);
-		printf("brightness_read = %d\n",brightness_read);
-		printf("current_read = %d\n",current_read);
-		
-	}
-	*/
-	else if(!strncmp(tokens[0],"BLSWITCH",strlen("BLSWITCH")))
-	{
-		
-		if(i != 2)
-		{
-			usart_send_line(WRONG_COMMAND);
-			usart_send_line("format: BLSWITCH <Mode>, example: BLSWITCH 3");
-			return;
-		}
-		
-		//Device Control Register, Address 01h
-		//7 		|		6 		|		5 		|		4 		|		3 	|		2 	|		1 	|		0
-		//FAST 																					BRT_MODE[1:0] 	 	BL_CTL
-		int mode_to_switch = atoi(tokens[1]);
-		
-		if(mode_to_switch < 0 || mode_to_switch > 4)
-		{
-			usart_send_line("mode wrong, range is 1~4");
-			return;
-		}
-		mode_to_switch = mode_to_switch & 0x3;
-		uint8_t mode_mask = 0xff;
-		mode_mask = mode_mask & (mode_to_switch << 1);
-		
-		uint8_t device_control = 0;
-		ee_READ_BYTES( DEVICE_CONTROL,&device_control,1);
-		
-		printf("\r\ndevice_control:%d\r\n",device_control);
-		device_control = device_control & mode_mask;   //set BRT_MODE to Device Control register
-		
-		ret = ee_WRITE_BYTES(DEVICE_CONTROL,&device_control,1);
-
-		uint8_t read_device_control = 0;
-		ret = ee_READ_BYTES(DEVICE_CONTROL,&read_device_control,1);
-		printf("read read_mode=%d\n",read_device_control);
-	}
-	else if(!strncmp(tokens[0],"BLSETTINGGET",strlen("BLSETTINGGET")))
-	{
-		if(i != 1)
-		{
-			usart_send_line(WRONG_COMMAND);
-			usart_send_line("format: BLSETTINGGET");
-			return;
-		}
-		last_setting_get();
-	}
-	else if(!strncmp(tokens[0],"BLSETMODE0",strlen("BLSETMODE0")) ||
-		!strncmp(tokens[0],"BLSETMODE1",strlen("BLSETMODE1")))
-	{
-		if(i != 1)
-		{
-			usart_send_line(WRONG_COMMAND);
-			usart_send_line("format: BLSETMODEn");
-			return;
-		}
-		
-		printf("\r\n handle cmd: %s",tokens[0]);
-		FLASH_Unlock();
-		
-		//擦除前获取保存的参数
-		get_flash_para();
-		FLASH_ErasePage(PAGE_ADDR(7));
-		
-		if(!strncmp(tokens[0],"BLSETMODE0",strlen("BLSETMODE0")))
-		{
-			para_array[mode_index] = 2;
-		}
-		else
-		{
-			para_array[mode_index] = 3;
-		}
-		
-		uint32_t write_addr = PAGE_ADDR(7);
-		uint16_t *wrtie_data_p = para_array;
-		uint16_t *read_p ;
-		int i = 0;
-		
-		for(i = 0;i < 3;i++)
-		{
-			//写入数据到flash中
-			FLASH_ProgramHalfWord(write_addr,*wrtie_data_p);
-			write_addr += 2;	
-			wrtie_data_p++;		
-		}
-		
-		read_p = (uint16_t *)PAGE_ADDR(7);
-		for(i = 0;i < 3;i++)
-		{
-			printf("\r\nwrite[%d] = %d , read[%d] = %d",i,para_array[i],i,read_p[i]);
-			if(para_array[i] != read_p[i])
-			{
-				printf("\r\n数据校验失败");
-				break;
-			}
-		}
-		if(i == 3)
-		{
-			printf("\r\nWrite Data to flash success,the mode has been set to 3 and saved.");
-		}
-			
-		FLASH_Lock();
-		
-		//set the 8556 mode with i2c 
-		int mode_to_switch = para_array[mode_index];
-		mode_to_switch = mode_to_switch & 0x3; //取最后两bit
-		uint8_t mode_mask = 0xff;
-		mode_mask = mode_mask & (mode_to_switch << 1);
-		
-		uint8_t device_control = 0;
-		ee_READ_BYTES( DEVICE_CONTROL,&device_control,1);
-		
-		printf("\r\nold_mode:%d\r\n",device_control);
-		device_control = device_control & mode_mask;   //set BRT_MODE
-		
-		ee_WRITE_BYTES( DEVICE_CONTROL,&device_control,1);
-		
-	}
-/*
-	else if(!strncmp(tokens[0],"BLSET3DCURRENT",strlen("BLSET3DCURRENT")))
-	{
-		if(i != 1)
-		{
-			usart_send_line(WRONG_COMMAND);
-			usart_send_line("format: BLSET3DCURRENT");
-			return;
-		}
-		
-		printf("\r\n handle cmd: %s",tokens[0]);
-		
-		//获取当前的电流值
-		uint8_t current = 0;
-		//I2C_EE_BufferRead(&current,CFG0,1);
-		printf("\r\n The current:%d",current);
-		
-		FLASH_Unlock();
-		
-		//擦除前获取保存的参数
-		get_flash_para();
-		FLASH_ErasePage(PAGE_ADDR(7));
-		
-		para_array[current_index] = current;
-		
-		uint32_t write_addr = PAGE_ADDR(7);
-		uint16_t *wrtie_data_p = para_array;
-		uint16_t *read_p ;
-		int i = 0;
-		
-		for(i = 0;i < 3;i++)
-		{
-			//写入数据到flash中
-			FLASH_ProgramHalfWord(write_addr,*wrtie_data_p);
-			write_addr += 2;	
-			wrtie_data_p++;		
-		}
-		
-		read_p = (uint16_t *)PAGE_ADDR(7);
-		for(i = 0;i < 3;i++)
-		{
-			printf("\r\nwrite[%d] = %d , read[%d] = %d",i,para_array[i],i,read_p[i]);
-			if(para_array[i] != read_p[i])
-			{
-				printf("\r\n数据校验不等");
-				break;
-			}
-		}
-		if(i == 3)
-		{
-			printf("\r\nWrite Data to flash success,the mode has been set to 3 and saved.");
-		}
-			
-		FLASH_Lock();
-	}
-	*/
-}
-
-char usart_buf[COMMAND_MAX_LENGTH];
-unsigned short usart_buf_length=0;
 
 void USART1_IRQHandler() {
     unsigned char received;
 
-    if (USART_GetITStatus(USART1, USART_IT_RXNE) != RESET) {
+    if ((USART_GetITStatus(USART1, USART_IT_RXNE) != RESET)) {
         received = USART_ReceiveData(USART1);
 
         if (received == CR) {
-            usart_buf[usart_buf_length] = 0;
-            usart_send_newline();
-
-            handle_command(usart_buf);
+            g_usart_buf[usart_buf_length] = 0;
+            //usart_send_newline();
+            //command_parse();
+            cmd_received = 1;
             usart_buf_length = 0;
         } else if (received == LF) {
             // ignore
@@ -401,14 +288,13 @@ void USART1_IRQHandler() {
 
             }
 
-            usart_buf[usart_buf_length++] = received;
+            g_usart_buf[usart_buf_length++] = received;
 
             // echo
-            usart_send(received);
+            //usart_send(received);
         }
     }
 }
-
 
 void delay(u16 num)
 {
@@ -417,281 +303,754 @@ void delay(u16 num)
     for(j=0;j<0x800;j++);
 }
 
+int init_chip_8556()
+{
+    uint8_t tData[3];
+    int i=0, ending_flag=0;
+    uint8_t read_data;
+    while (ending_flag == 0) 
+    {
+        if (i2c_init_table[i][0] == 0xff) {    //special mark
+                if (i2c_init_table[i][1] == 0xff) { //ending flag
+                        ending_flag = 1;
+                }
+        }
+        else {
+            tData[0]=i2c_init_table[i][0];
+            tData[1]=i2c_init_table[i][1];
+            ee_WRITE_BYTES(tData[0], &tData[1], 1);
+            delay(1000);
+            ee_READ_BYTES(tData[0], &read_data, 1);
+            if(tData[1] == read_data)
+            {
+                printf("address:0x%x, value:0x%x,set successfully\r\n",tData[0],read_data);
+            }
+            else
+            {
+                printf("address:0x%x, value:0x%x,set successfully\r\n",tData[0],read_data);
+                return -1;
+            }
+        }
+        i++;
+    }
+    return 0;
+}
+
+void dump_chip_8556()
+{
+    uint8_t tData[3];
+    int i=0, ending_flag=0;
+    uint8_t read_data = 0;
+    printf("Dump 8556 reg:\r\n");
+    printf("address          value\r\n");
+    while (ending_flag == 0) 
+    {
+        if (i2c_init_table[i][0] == 0xff) {    //special mark
+            if (i2c_init_table[i][1] == 0xff) { //ending flag
+                ending_flag = 1;
+            }
+        }
+        else {
+            tData[0]=i2c_init_table[i][0];
+            tData[1]=i2c_init_table[i][1];
+            ee_READ_BYTES(tData[0], &read_data, 1);
+            printf("0x%-15x0x%-5x\r\n",tData[0],read_data);
+        }
+        i++;
+    }
+}
+
+int is_flash_new()
+{
+    //在page8设置标志位，第一次运行设置默认值  
+    uint32_t *read_p = (uint32_t *)PAGE_ADDR(51);
+    if(*read_p == 0x5a5b5c)
+        return 0;
+    else
+        return 1;
+}
+
+void set_flash_tag()
+{
+    FLASH_Unlock();
+    
+    FLASH_ErasePage(PAGE_ADDR(51));
+    
+    uint32_t write_addr = PAGE_ADDR(51);
+    uint32_t wrtie_data = 0x5a5b5c;
+    
+    FLASH_ProgramWord(write_addr,wrtie_data);
+    
+    FLASH_Lock();
+
+}
+
+void brightness_init()
+{
+    if(is_flash_new())
+    {
+        set_flash_tag();
+
+        FLASH_Unlock();
+        FLASH_ErasePage(PAGE_ADDR(50));
+
+        uint32_t write_addr = PAGE_ADDR(50);
+
+        uint32_t *wrtie_data_p = g_setting;
+        for(int i = 0;i < 6;i++)
+        {
+            //write data into flash
+            FLASH_ProgramWord(write_addr,*wrtie_data_p);
+            write_addr += 4;
+            wrtie_data_p++;
+
+        }
+        
+        set_sys_brightness(g_setting[brightness_index]);
+    }
+    else
+    {
+        get_flash_setting();
+        set_sys_brightness(g_setting[brightness_index]);
+    }
+}
+
+void init()
+{
+    int ret = 0;
+    USART_Config();
+    ADVANCE_TIM_Init();
+    printf("init...\r\n");
+    Usart_SendString(DEBUG_USARTx, "pwm is on, f=17570hz\r\n");
+    i2c_GPIO_Config();
+    delay(2000);
+
+    if(ee_CHECK_DEVICE(WRITE_DIR_8556) == 0)
+    {
+        printf("8556 has been detected.\r\n");
+    }
+    else
+    {
+        printf("8556 has not been detected\r\n");
+    }
+
+    delay(2000);
+
+    ret = init_chip_8556();
+    if(ret != 0)
+    {
+        printf("[ERROR]8556 init fail.\r\n");
+    }
+
+    brightness_init();
+
+}
+
+int i2c_read_8556()
+{
+    if(cmd_key_num != 2)
+    {
+        usart_send_line(WRONG_FORMAT);
+        return -1;
+    }
+    char *str = NULL;
+    
+    uint8_t read_data = 0;
+    int address_input = strtol(g_tokens[1],&str,16);
+    if(address_input > 255 || address_input < 0 || (*str) != '\0')
+    {
+        usart_send_line("[ERROR]address can only be a 8 bit HEX num!");
+        return -1;
+    }
+    
+    uint8_t address = (uint8_t)address_input;
+    ee_READ_BYTES(address, &read_data, 1);
+    printf("address          value\r\n");
+    printf("0x%-15x0x%-5x\r\n",address,read_data);
+    return 0;
+}
+
+
+int i2c_write_8556()
+{
+    if(cmd_key_num != 3)
+    {
+        usart_send_line(WRONG_FORMAT);
+        return -1;
+    }
+    char *str = NULL;
+    
+    int address_input = strtol(g_tokens[1],&str,16);
+
+    if(address_input > 255 || address_input < 0 || (*str) != '\0')
+    {
+        usart_send_line("[ERROR]address can only be a uint8 HEX num!");
+        return -1;
+    }
+    int value_input = strtol(g_tokens[2],&str,16);
+    if(value_input > 255 || value_input < 0 || (*str) != '\0')
+    {
+        usart_send_line("[ERROR]value can only be a uint8 HEX num!");
+        return -1;
+    }
+
+    uint8_t read_data = 0;
+    uint8_t address = (uint8_t)address_input;
+    uint8_t value = (uint8_t)value_input;
+    
+    ee_WRITE_BYTES(address, &value, 1);
+    ee_READ_BYTES(address, &read_data, 1);
+    if(value == read_data)
+    {
+        printf("write successfully,result:\r\n");
+        printf("address          value\r\n");
+        printf("0x%-15x0x%-5x\r\n",address,read_data);
+    }
+    else
+    {
+        printf("The result is not correct!");
+        return -1;
+    }
+    
+    return 0;
+}
+
+
+void set_sys_brightness(uint8_t brightness)
+{
+    //set 2d brightness,use i2c to set brightness register
+    uint8_t blu_brightness_2d = 0;
+    if(g_setting[mode_index] == 2)
+    {
+        blu_brightness_2d = brightness * ((double)g_setting[mode2ratio2d_index] / 100.0);
+    }
+    else
+    {
+        blu_brightness_2d = brightness * ((double)g_setting[mode2ratio3d_index] / 100.0);
+    }
+    uint8_t ibrightness_read = 0;
+        
+    printf("\r\nbrightness:%d\r\n",blu_brightness_2d);
+    
+    ee_WRITE_BYTES(BRIGHTNESS_CONTROL,&blu_brightness_2d,1);
+
+    ee_READ_BYTES(BRIGHTNESS_CONTROL,&ibrightness_read,1);
+
+    if(brightness == ibrightness_read)
+    {
+        usart_send_line("2d set successfully!");
+    }
+    else
+    {
+        usart_send_line("2d set failed!");
+    }
+
+    //set 3d brightness, use pwm duty to set brightness
+    int blu_brightness_3d = 0;
+    if(g_setting[mode_index] == 2)
+    {
+        blu_brightness_3d = brightness * ((double)g_setting[mode3ratio2d_index] / 100.0);
+    }
+    else
+    {
+        blu_brightness_3d = brightness * ((double)g_setting[mode3ratio3d_index] / 100.0);
+    }
+
+    int duty_3d = (blu_brightness_3d / 255.0) * DUTY_MAX_3D;
+    ADVANCE_TIM_Mode_Config(2048,duty_3d);
+}
+
+void mode_switch()
+{
+    if(cmd_key_num != 2)
+    {
+        usart_send_line(WRONG_FORMAT);
+        return;
+    }
+
+    int mode = atoi(g_tokens[1]);
+    if(mode != 2 && mode != 3)
+    {
+        usart_send_line("[ERROR]mode must be 2 or 3!");
+        return;
+    }
+
+    g_setting[mode_index] = mode;
+    save_setting_in_flash();
+    set_sys_brightness(g_setting[brightness_index]);
+}
+
+void get_flash_setting()
+{
+    uint32_t *read_p = (uint32_t *)PAGE_ADDR(51);
+    //printf("tag:%d\r\n",*read_p);
+
+    read_p = (uint32_t *)PAGE_ADDR(50);
+    for(int i = 0; i < 6; i++)
+    {
+        g_setting[i] = read_p[i];
+        //printf("g_setting[%d]:%d\r\n",i,g_setting[i]);
+    }
+}
+
+void save_setting_in_flash()
+{
+    FLASH_Unlock();
+
+    FLASH_ErasePage(PAGE_ADDR(50));
+
+    uint32_t write_addr = PAGE_ADDR(50);
+    uint32_t *wrtie_data_p = g_setting;
+    uint32_t *read_p;
+    int i = 0;
+
+    for(i = 0;i < 6;i++)
+    {
+        //write data into flash
+        FLASH_ProgramWord(write_addr,*wrtie_data_p);
+        write_addr += 4;
+        wrtie_data_p++;
+    }
+
+    read_p = (uint32_t *)PAGE_ADDR(50);
+    for(i = 0; i < 6; i++)
+    {
+        //printf("\r\nwrite[%d] = %d, read[%d] = %d",i,g_setting[i],i,read_p[i]);
+        if(g_setting[i] != read_p[i])
+        {
+            break;
+        }
+    }
+    
+    if(i == 6)
+    {
+        printf("\r\nWrite Data to flash success.");
+    }
+    
+    FLASH_Lock();
+
+}
+
+void mode_set_ratio()
+{
+    if(cmd_key_num != 4)
+    {
+        usart_send_line(WRONG_FORMAT);
+        return;
+    }
+
+    int mode = atoi(g_tokens[1]);
+    char *str1,*str2 = NULL;
+    double ratio_2d = strtod(g_tokens[2],&str1);
+    double ratio_3d = strtod(g_tokens[3],&str2);
+
+    if((mode != 2 && mode != 3) || (*str1 != '\0') || (*str2 != '\0'))
+    {
+        usart_send_line("mode or ratio illegal");
+        return;
+    }
+
+    if(ratio_2d > 1.00 || ratio_2d < 0.00 || ratio_3d > 3.00 || ratio_3d < 0.00)
+    {
+        usart_send_line("ratio error,ratio_2d:0.00~1.00 ,ratio_3d:0.00~3.00");
+        return;
+    }
+
+    if(mode == 2)
+    {
+        g_setting[mode2ratio2d_index] = (int)(ratio_2d * 100);
+        g_setting[mode2ratio3d_index] = (int)(ratio_3d * 100);
+    }
+    else
+    {
+        g_setting[mode3ratio2d_index] = (int)(ratio_2d * 100);
+        g_setting[mode3ratio3d_index] = (int)(ratio_3d * 100);
+    }
+
+    //save in stm32's flash
+    save_setting_in_flash();
+    set_sys_brightness(g_setting[brightness_index]);
+    
+}
+
+void setting_get()
+{
+    if(cmd_key_num != 1)
+    {
+        usart_send_line(WRONG_FORMAT);
+        return;
+    }
+
+    get_flash_setting();
+    int brightness = 0;
+    double mode2_ratio_2d = g_setting[mode2ratio2d_index] / 100.0;
+    double mode2_ratio_3d = g_setting[mode2ratio3d_index] / 100.0;
+    double mode3_ratio_2d = g_setting[mode3ratio2d_index] / 100.0;
+    double mode3_ratio_3d = g_setting[mode3ratio3d_index] / 100.0;
+    double current_2d = (double)brightness / g_setting[mode2ratio2d_index] /255 * 25.00;
+    double current_3d = (double)brightness / g_setting[mode2ratio3d_index] /255 * 14.00;
+    printf("Display current system configurations:\r\n");		
+    printf("brightness: %d\r\n",brightness);
+    printf("+------+----------+----------+------------+------------+\r\n");
+    printf("| mode | 2D_ratio | 3D_ratio | 2D_current | 3D_current |\r\n");
+    if(g_setting[mode_index] == 2)
+    {
+        printf("+------+----------+----------+------------+------------+\r\n");
+        printf("|%-6d|%-10.2f|%-10.2f|%-12.2f|%-12.2f|\r\n",2,mode2_ratio_2d,mode2_ratio_3d,current_2d,current_3d);
+    }
+    else
+    {
+        printf("+------+----------+----------+------------+------------+\r\n");
+        printf("|%-6d|%-10.2f|%-10.2f|%-12.2f|%-12.2f|\r\n",3,mode3_ratio_2d,mode3_ratio_3d,current_2d,current_3d);
+    }
+
+    printf("+------+----------+----------+------------+------------+\r\n\r\n");
+}
+
+void set_2d_current()
+{
+    if(cmd_key_num != 2)
+    {
+        usart_send_line(WRONG_FORMAT);
+        return;
+    }  
+
+    char *str = NULL;
+    double current = strtod(g_tokens[1],&str);
+
+    if((*str != '\0'))
+    {
+        usart_send_line("current illegal");
+        return;
+    }
+
+    if(current > 25.00 || current < 0.00)
+    {
+        usart_send_line("current error,current:0.00~25.00");
+        return;
+    }
+    
+    int brightness = current / 25.00 * 255;
+    uint8_t ibrightness_read = 0;
+		
+    uint8_t brightness_set = (uint8_t)brightness;
+    ee_WRITE_BYTES(BRIGHTNESS_CONTROL,&brightness_set,1);
+
+    ee_READ_BYTES(BRIGHTNESS_CONTROL,&ibrightness_read,1);
+
+    if(brightness == ibrightness_read)
+    {
+        printf("2d set successfully! This setting is temporary. Now temp brightness is %d\r\n",ibrightness_read);
+    }
+    else
+    {
+        usart_send_line("2d set failed!");
+    }
+    
+}
+
+void set_3d_current()
+{
+    if(cmd_key_num != 2)
+    {
+        usart_send_line(WRONG_FORMAT);
+        return;
+    }  
+
+    char *str = NULL;
+    double current = strtod(g_tokens[1],&str);
+
+    if((*str != '\0'))
+    {
+        usart_send_line("current illegal");
+    }
+
+    if(current > 14.00 || current < 0.00)
+    {
+        usart_send_line("current error,current:0.00~25.00");
+    }
+    
+    int brightness = current / 14.00 * 255;
+
+    int duty_3d = (brightness / 255.0) * DUTY_MAX_3D;
+    ADVANCE_TIM_Mode_Config(2048,duty_3d);
+
+}
+
+void set_pwm()
+{
+    if(cmd_key_num != 2)
+    {
+        usart_send_line(WRONG_FORMAT);
+        return;
+    }  
+
+    int mode = atoi(g_tokens[1]);
+    int duty = atoi(g_tokens[2]);
+
+    if((mode != 2 && mode != 3))
+    {
+        usart_send_line("mode illegal");
+        return;
+    }
+
+    if(duty < 0.00 || duty > 1024)
+    {
+        usart_send_line("duty error,duty can only be 0~1024");
+        return;
+    }
+
+    ADVANCE_TIM_Mode_Config(2048,duty);   
+}
+
+void clear_cmd_info(void)
+{
+    cmd_id = CMD_NULL;
+    cmd_key_num = 0;
+    memset(g_usart_buf,0,COMMAND_MAX_LENGTH);
+}
+
+void handle_command()
+{
+    switch(cmd_id){
+        case HELP:
+        {
+            printf("\r\nShow All Commands:\r\n%s\r\n",cmd_help_str);
+            clear_cmd_info();
+            break;
+        }      
+        case DUMP:
+        {                
+            dump_chip_8556();
+            clear_cmd_info();
+            break;
+        }
+        case I2CREAD:
+        {
+            int ret = i2c_read_8556();
+            if (ret != 0)
+                printf("Command I2CREAD fail.\r\n");
+            clear_cmd_info();
+            break;
+        }
+        case I2CWRITE:
+        {
+            int ret = i2c_write_8556();
+            if (ret != 0)
+                printf("Command I2CWRITE fail.\r\n");
+            clear_cmd_info();
+            break;
+        }
+        case BLSWITCH:
+        {
+            mode_switch();
+            clear_cmd_info();
+            break;
+        }
+        case BLSETBRIGHTNESS:
+        {
+            uint8_t brightness = atoi(g_tokens[1]);
+            set_sys_brightness(brightness);
+
+            clear_cmd_info();
+            break;
+        }
+        case BLSETRATIOS:
+        {
+            mode_set_ratio();
+            clear_cmd_info();
+            break;
+        }
+        case BLSETTINGSGET:
+        {
+            setting_get();
+            clear_cmd_info();      
+            break;
+        }
+        case BLSET2DCURRENT:
+        {
+            set_2d_current();
+            clear_cmd_info();       
+            break;  
+        }
+        case BLSET3DCURRENT:
+        {
+            set_3d_current();
+            clear_cmd_info();       
+            break;  
+        }
+        case BLSETPWM:
+        {
+            set_pwm();
+            clear_cmd_info();       
+            break; 
+        }
+        case POKE32:
+        {
+            char *str1 = NULL;
+            char *str2 = NULL;
+            int address_input = strtol(g_tokens[1],&str1,16);
+            int data_input = strtol(g_tokens[2],&str2,16);
+
+            if((*str1) != '\0')
+            {
+                usart_send_line("[ERROR]address can only be a 32 bit HEX num!");
+                break;
+            }
+
+            if((*str2) != '\0')
+            {
+                usart_send_line("[ERROR]data can only be a 32 bit HEX num!");
+                break;
+            }
+
+            uint32_t *p = (uint32_t *)address_input;
+            *p = data_input;
+            clear_cmd_info();
+            break; 
+        }
+        case POKE16:
+        {
+            char *str1 = NULL;
+            char *str2 = NULL;
+            int address_input = strtol(g_tokens[1],&str1,16);
+            int data_input = strtol(g_tokens[2],&str2,16);
+            
+            if((*str1) != '\0')
+            {
+                usart_send_line("[ERROR]address can only be a 16 bit HEX num!");
+                break;
+            }
+
+            if((*str2) != '\0' || data_input < 0 || data_input > 65535)
+            {
+                usart_send_line("[ERROR]data can only be a 16 bit HEX num!");
+                break;
+            }
+
+            uint16_t *p = (uint16_t *)address_input;
+            *p = data_input;
+
+            clear_cmd_info();     
+            break; 
+        }
+        case POKE8:
+        {
+            char *str1 = NULL;
+            char *str2 = NULL;
+            int address_input = strtol(g_tokens[1],&str1,16);
+            int data_input = strtol(g_tokens[2],&str2,16);
+            
+            if((*str1) != '\0')
+            {
+                usart_send_line("[ERROR]address can only be a 8 bit HEX num!");
+                break;
+            }
+
+            if((*str2) != '\0' || data_input < 0 || data_input > 255)
+            {
+                usart_send_line("[ERROR]data can only be a 8 bit HEX num!");
+                break;
+            }
+
+            uint8_t *p = (uint8_t *)address_input;
+            *p = data_input;
+
+            clear_cmd_info();        
+            break; 
+        }
+        case PEEK32:
+        {
+            char *str1 = NULL;
+            int address_input = strtol(g_tokens[1],&str1,16);
+            
+            if((*str1) != '\0')
+            {
+                usart_send_line("[ERROR]address can only be a 32 bit HEX num!");
+                break;
+            }
+
+            uint32_t *p = (uint32_t *)address_input;
+            printf("address:0x%x, data:0x%x\r\n",address_input,*p);
+
+            clear_cmd_info();
+            break; 
+        }
+        case PEEK16:
+        {
+            char *str1 = NULL;
+            int address_input = strtol(g_tokens[1],&str1,16);
+            
+            if((*str1) != '\0')
+            {
+                usart_send_line("[ERROR]address can only be a 32 bit HEX num!");
+                break;
+            }
+
+            uint16_t *p = (uint16_t *)address_input;
+            printf("address:0x%x, data:0x%x\r\n",address_input,*p);
+
+            clear_cmd_info();       
+            break; 
+        }
+        case PEEK8:
+        {
+            char *str1 = NULL;
+            int address_input = strtol(g_tokens[1],&str1,16);
+            
+            if((*str1) != '\0')
+            {
+                usart_send_line("[ERROR]address can only be a 32 bit HEX num!");
+                break;
+            }
+
+            uint8_t *p = (uint8_t *)address_input;
+            printf("address:0x%x, data:0x%x\r\n",address_input,*p);
+
+            clear_cmd_info();
+            break; 
+        }
+        case GPIOREAD:
+        {
+            clear_cmd_info();
+            break;
+        }
+        case GPIOREADPIN:
+        {
+            clear_cmd_info();
+            break;
+        }
+        case GPIOSETPIN:
+        {
+            clear_cmd_info();
+            break;
+        }
+        case GPIOCLRPIN:
+        {
+            clear_cmd_info();
+            break; 
+        }
+        case CMD_NULL:
+            break;
+        default:
+            break;
+    }
+}   
 
 int main(void)
 {
-	
-	USART_Config();
-	
-	ADVANCE_TIM_Init();
+    init();
 
-	printf("init...\r\n");
-	
-	Usart_SendString(DEBUG_USARTx, "pwm is on, f=2500hz\r\n");
-
-	i2c_GPIO_Config();
-	
-	delay(2000);
-	
-	if(ee_CHECK_DEVICE(WRITE_DIR_8556) == 0)
-	{
-		printf("\r\n8556 has been detected.\r\n");
-	}
-	else
-	{
-		printf("\r\n8556 has not been detected\r\n");
-	}
-
-	delay(2000);
-	
-	int ret = 0;
-
-	//Setting Current
-#if 0
-	uint8_t cfg0_read = 0;
-	uint8_t cfg0 = 0;
-	ret = ee_READ_BYTES(CFG0,&cfg0_read,1);
-	
-	cfg0 = 0xff;
-	ret = ee_WRITE_BYTES(CFG0,&cfg0,1);
-	cfg0_read = 0;
-	ret = ee_READ_BYTES(CFG0,&cfg0_read,1);
-	printf("\r\ncfg0 now is 0x%x\r\n",cfg0_read);
-	
-	delay(100);
-	uint8_t cfg1_read = 0;
-	uint8_t cfg1 = 0;
-	ret = ee_READ_BYTES(CFG1,&cfg1_read,1);
-	cfg1 = 0x3f;
-	ret = ee_WRITE_BYTES(CFG1,&cfg1,1);
-	cfg1_read = 0;
-	ret = ee_READ_BYTES(CFG1,&cfg1_read,1);
-	printf("\r\ncfg1 now is 0x%x\r\n",cfg1_read);
-	
-	delay(100);
-	uint8_t cfg4_read = 0;
-	uint8_t cfg4 = 0;
-	ret = ee_READ_BYTES(CFG4,&cfg4_read,1);
-	cfg4 = 0x70;
-	ret = ee_WRITE_BYTES(CFG4,&cfg4,1);
-	cfg4_read = 0;
-	ret = ee_READ_BYTES(CFG4,&cfg4_read,1);
-	printf("\r\ncfg4 now is 0x%x\r\n",cfg4_read);
-	
-	uint8_t cfg5_read = 0;
-	uint8_t cfg5 = 0;
-	ret = ee_READ_BYTES(CFG5,&cfg5_read,1);
-	cfg5 = 0x04;
-	ret = ee_WRITE_BYTES(CFG5,&cfg5,1);
-	cfg5_read = 0;
-	ret = ee_READ_BYTES(CFG5,&cfg5_read,1);
-	printf("\r\ncfg5 now is 0x%x\r\n",cfg5_read);
-
-	delay(100);
-	//EMI Reduction Settings
-	uint8_t cfg7_read = 0;
-	uint8_t cfg7 = 0;
-	ret = ee_READ_BYTES(CFG7,&cfg7_read,1);
-	cfg7 = 0x3f;
-	ret = ee_WRITE_BYTES(CFG7,&cfg7,1);
-	cfg7_read = 0;
-	ret = ee_READ_BYTES(CFG7,&cfg7_read,1);
-	printf("\r\ncfg7 now is 0x%x\r\n",cfg7_read);
-	
-	//设置MODE
-	uint8_t device_control = 0;
-	uint8_t device_control_read = 0;
-	device_control |= (1 << 1);
-	ret = ee_WRITE_BYTES(DEVICE_CONTROL_ADDRESS,&device_control,1);
-	ret = ee_READ_BYTES(DEVICE_CONTROL_ADDRESS,&device_control_read,1);
-	printf("\r\ndevice_control now is 0x%x\r\n",device_control_read);
-	
-
-#endif	
-#if 0
-	//设置MODE
-	uint8_t device_control = 0;
-	uint8_t device_control_read = 0;
-	device_control |= (1 << 1);
-	ret = ee_WRITE_BYTES(DEVICE_CONTROL,&device_control,1);
-	ret = ee_READ_BYTES(DEVICE_CONTROL_ADDRESS,&device_control_read,1);
-	printf("\r\ndevice_control now is 0x%x\r\n",device_control_read);
-
-	delay(100);
-	uint8_t cfg2_read = 0;
-	uint8_t cfg2 = 0;
-	ret = ee_READ_BYTES(CFG2,&cfg2_read,1);
-	cfg2 = 0x08;
-	ret = ee_WRITE_BYTES(CFG2,&cfg2,1);
-	cfg2_read = 0;
-	ret = ee_READ_BYTES(CFG2,&cfg2_read,1);
-	printf("\r\ncfg2 now is 0x%x\r\n",cfg2_read);	
-
-
-	delay(100);
-	//VBOOST参数
-	uint8_t cfg6_read = 0;
-	uint8_t cfg6 = 0;
-	ret = ee_READ_BYTES(CFG6,&cfg6_read,1);
-	cfg6 = 0x8d;
-	ret = ee_WRITE_BYTES(CFG6,&cfg6,1);
-	ret = ee_READ_BYTES(CFG6,&cfg6_read,1);
-	printf("\r\ncfg6 now is 0x%x\r\n",cfg6_read);
-	
-
-	delay(100);
-	//VBOOST_MAX
-	uint8_t cfg9_read = 0;
-	uint8_t cfg9 = 0;
-	ret = ee_READ_BYTES(CFG9,&cfg9_read,1);
-	cfg9 = 0x90;
-	ret = ee_WRITE_BYTES(CFG9,&cfg9,1);
-	cfg9_read = 0;
-	ret = ee_READ_BYTES(CFG9,&cfg9_read,1);
-	printf("\r\ncfg9 now is 0x%x\r\n",cfg9_read);
-	
-	delay(100);
-	//Setting Boost Voltage
-	uint8_t cfga_read = 0;
-	uint8_t cfga = 0;
-	ret = ee_READ_BYTES(CFGA,&cfga_read,1);
-	cfga = 0x38;
-	ret = ee_WRITE_BYTES(CFGA,&cfga,1);
-	ret = ee_READ_BYTES(CFGA,&cfga_read,1);
-	printf("\r\ncfga now is 0x%x\r\n",cfga_read);
-	
-	uint8_t cfg9e_read = 0;
-	uint8_t cfg9e = 0;
-	
-	//设置VBOOST_RANGE
-	ret = ee_READ_BYTES(CFG9E,&cfg9e_read,1);
-	//cfg9e = cfg9e_read | (1 << 5);
-	cfg9e = 0x20;
-	ret = ee_WRITE_BYTES(CFG9E,&cfg9e,1);
-	ret = ee_READ_BYTES(CFG9E,&cfg9e_read,1);
-	printf("\r\ncfg9e now is 0x%x\r\n",cfg9e_read);
-	
-/*
-	delay(100);
-	ret = ee_READ_BYTES(CFG2,&cfg2_read,1);
-	cfg2 = 0x08;
-	ret = ee_WRITE_BYTES(CFG2,&cfg2,1);
-	cfg2_read = 0;
-	ret = ee_READ_BYTES(CFG2,&cfg2_read,1);
-	//printf("\r\ncfg2 now is 0x%x\r\n",cfg2_read);	
-*/
-
-	uint8_t status = 0;
-	ret = ee_READ_BYTES(STATUS_ADDRESS,&status,1);
-	printf("\r\nstatus now is 0x%x\r\n",status);
-#endif	
-
-#if 1
-
-	static unsigned char i2c_init_table[][2] = {
-    {0xa1, 0x7F},  //hight bit(8~11)(0~0X66e set backlight)
-    {0xa0, 0x66},  //low bit(0~7)  20mA
-    {0x16, 0x3F},  // 5channel LED enable 0x1F
-    {0xa9, 0xc0},  //VBOOST_MAX 25V
-    {0x9e, 0x22},  //VBOOST_RANGE
-    {0xa2, 0x2b},  //BOOST_FSET_EN PWM_FSET_EN 
-		{0xa6, 0x47},	 //VBOOST 
-    {0x01, 0x05},  //0x03 pwm+I2c set brightness,0x5 I2c set brightness
-    {0xff, 0xff},  //ending flag
-};
-#endif
-
-#if 0
-static unsigned char i2c_init_table[][2] = {
-    {0xa1, 0x7f},  //hight bit(8~11)(0~0X66e set backlight)
-    {0xa0, 0x66},  //low bit(0~7)  20mA
-    {0x16, 0x3F},  // 5channel LED enable 0x1F
-    {0xa9, 0xa0},  //VBOOST_MAX 25V
-		{0xaa, 0x30},  //ADAPTIVE
-    {0x9e, 0x12},  //VBOOST_RANGE
-    {0xa2, 0x2b},  //BOOST_FSET_EN PWM_FSET_EN 
-		{0xa6, 0x3f},	 //VBOOST 0.42*11
-    {0x01, 0x03},  //0x03 pwm+I2c set brightness,0x5 I2c set brightness
-    {0xff, 0xff},  //ending flag
-};
-#endif
-
-#if 0
-	static unsigned char i2c_init_table[][2] = {
-    {0xa1, 0x7F}, //hight bit(8~11)(0~0X66e set backlight)
-    {0xa0, 0x66},  //low bit(0~7)  20mA
-    {0x16, 0x3F}, // 5channel LED enable 0x1F
-    {0xa9, 0xc0}, //VBOOST_MAX 25V
-    {0x9e, 0x22},  //VBOOST_RANGE
-    {0xa2, 0x2b},  //BOOST_FSET_EN PWM_FSET_EN 
-		{0xa6, 0x07},	//VBOOST 0.42*11
-    {0x01, 0x05}, //0x03 pwm+I2c set brightness,0x5 I2c set brightness
-    {0xff, 0xff},//ending flag
-};
-#endif
-/*
-static unsigned char i2c_init_table[][2] = {
-    {0xa0, 0x66},  //low bit(0~7)  20mA
-    {CFG9, 0xA0}, //VBOOST_MAX 25V
-		{CFGA, 0x30},
-    {CFG6, 0x80}, 
-    {0xff, 0xff},//ending flag
-};
-*/
-    uint8_t tData[3];
-    int i=0, ending_flag=0;
-		uint8_t read_data;
-		while (ending_flag == 0) {
-		if (i2c_init_table[i][0] == 0xff) {    //special mark
-				if (i2c_init_table[i][1] == 0xff) { //ending flag
-						ending_flag = 1;
-				}
-		}
-		else {
-				tData[0]=i2c_init_table[i][0];
-				tData[1]=i2c_init_table[i][1];
-				ret = ee_WRITE_BYTES(tData[0], &tData[1], 1);
-				delay(1000);
-				ret = ee_READ_BYTES(tData[0], &read_data, 1);
-				printf("\r\naddress = 0x%x,read_data now is 0x%x\r\n",tData[0],read_data);
-		}
-		i++;
+    while(1)
+    {
+        if(cmd_received)
+        {
+            command_parse();
+            handle_command();
+            cmd_received = 0;
+        }
+    }
 }
 
 
-	uint8_t status = 0;
-	ret = ee_READ_BYTES(STATUS,&status,1);
-	printf("\r\nstatus now is 0x%x\r\n",status);
-
-	
-	while(1)
-	{
-		uint8_t status = 0;
-		ret = ee_READ_BYTES(STATUS,&status,1);
-		status = (status >> 4)& (0x1);
-		printf("\r\nstatus now is 0x%x\r\n",status);
-		delay(3000);
-		#if 0
-		delay(10000);
-		i = 0;
-		ending_flag = 0;
-		uint8_t read_data;
-		while (ending_flag == 0) {
-		if (i2c_init_table[i][0] == 0xff) {    //special mark
-				if (i2c_init_table[i][1] == 0xff) { //ending flag
-						ending_flag = 1;
-				}
-		}
-		else {
-				tData[0]=i2c_init_table[i][0];
-				tData[1]=i2c_init_table[i][1];
-				ret = ee_READ_BYTES(tData[0], &read_data, 1);
-				printf("\r\n---address = 0x%x,read_data now is 0x%x\r\n",tData[0],read_data);
-		}
-		i++;
-}
-		#endif
-	};
-
-}
 
