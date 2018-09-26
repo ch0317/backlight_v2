@@ -7,7 +7,6 @@
 #include "./i2c/bsp_i2c_gpio.h"
 #include "./i2c/bsp_i2c_ee.h"
 
-//#define END_FLAG '$'
 #define CR '\r'
 #define LF '\n'
 #define CRLF "\r\n"
@@ -27,6 +26,7 @@ enum CMD_ID{
     BLSET2DCURRENT,
     BLSET3DCURRENT,
     BLSETPWM,
+    SET2DCTRLMODE,
     POKE32,
     PEEK32,
     POKE16,
@@ -56,6 +56,7 @@ enum CMD_ID{
 
 //tokens for cmd analysis
 char *g_tokens[5];
+char board_info[128] = "version: 1.0    date: 2018-9-20    Copyright(c)2018Aieggy,Inc";
 char cmd_buffer[COMMAND_MAX_LENGTH];
 char g_usart_buf[COMMAND_MAX_LENGTH];
 int cmd_received = 0;
@@ -68,6 +69,7 @@ char cmd_help_str[1024] =   "HELP -- Display all commands\r\n" \
                             "BLSETBRIGHTNESS  <Brightness 0-255> -- default 102\r\n" \
                             "BLSETRATIOS <Mode 2 or 3>  <RATIO_2D 0.00-1.00>  <RATIO_3D 0.00-3.00>\r\n" \
                             "BLSWITCH    <Mode 2 or 3>\r\n" \
+                            "SET2DCTRLMODE <Mode 0 or 1> -- 2D control mode, 0 for i2c, 1 for pwm\r\n" \
                             "BLSETPWM    <2 or 3> <Duty cycle 0.00-100.00%>\r\n" \
                             "BLSET2DCURRENT  <0.00-25.00mA>\r\n" \
                             "BLSET3DCURRENT  <0.00-14.00mA>\r\n" \
@@ -83,12 +85,18 @@ char cmd_help_str[1024] =   "HELP -- Display all commands\r\n" \
                             "GPIOSETPIN  <port> <pin>\r\n" \
                             "GPIOCLRPIN  <port> <pin>\r\n";
 
+#define I2C_CTRL 0
+#define PWM_CTRL 1
+
+#define STORE_LEN 7
+
 #define mode_index 0
 #define brightness_index 1
 #define mode2ratio2d_index 2
 #define mode2ratio3d_index 3
 #define mode3ratio2d_index 4
 #define mode3ratio3d_index 5
+#define ctrlmode2d_index 6
 
 /*[0]mode, 
   [1]brightness, 
@@ -96,34 +104,33 @@ char cmd_help_str[1024] =   "HELP -- Display all commands\r\n" \
   [3]mode2ratio3d(0.00~3.00,default:0.15,map to 1~300 in memory), 
   [4]mode3ratio2d(0.00~1.00,default:0,map to 1~100 in memory), 
   [5]mode3ratio3d(0.00~3.00,default:1.0,map to 1~300 in memory),
+  [6]ctrlmode(0 for i2c, 1 for pwm)
 */
-static uint32_t g_setting[6] = {2,0,100,15,0,100}; 
-
-
+static uint32_t g_setting[STORE_LEN] = {2,102,100,15,0,100,I2C_CTRL}; 
 
 int cmd_id = CMD_NULL;
 int cmd_key_num = 0;
 static unsigned char i2c_init_table[][2] = {
-    {0xa1, 0x7F},  //hight bit(8~11)(0~0X66e set backlight)
-    {0xa0, 0x66},  //low bit(0~7)  20mA
+    {0xa1, 0x5F},  //hight bit(8~11)
+    {0xa0, 0xff},  //low bit(0~7)  25mA
     {0x16, 0x3F},  //5channel LED enable 0x1F
-    {0xa9, 0xa0},  //VBOOST_MAX 25V
-    {0x9e, 0x22},  //VBOOST_RANGE
+    {0xa9, 0x40},  //VBOOST_MAX = 010,17.9~23.1
+    {0x9e, 0x22},  //VBOOST_RANGE = 1
     {0xa2, 0x2b},  //BOOST_FSET_EN PWM_FSET_EN 
-    {0xa6, 0x47},  //VBOOST 
+    {0xa6, 0x05},  //VBOOST 
     {0x01, 0x05},  //0x03 pwm+I2c set brightness,0x5 I2c set brightness
     {0xff, 0xff},  //ending flag
 };
 
 #if 0
 static unsigned char i2c_init_table[][2] = {
-    {0xa1, 0x7F},  //hight bit(8~11)(0~0X66e set backlight)
-    {0xa0, 0x66},  //low bit(0~7)  20mA
-    {0x16, 0x3F},  // 5channel LED enable 0x1F
+    {0xa1, 0x7F},  //hight bit(8~11)(0~0X65e set backlight)
+    {0xa0, 0x56},  //low bit(0~7)  20mA
+    {0x15, 0x3F},  // 5channel LED enable 0x1F
     {0xa9, 0xc0},  //VBOOST_MAX 25V
     {0x9e, 0x22},  //VBOOST_RANGE
     {0xa2, 0x2b},  //BOOST_FSET_EN PWM_FSET_EN 
-    {0xa6, 0x07},    //VBOOST 0.42*11
+    {0xa5, 0x07},    //VBOOST 0.42*11
     {0x01, 0x05},  //0x03 pwm+I2c set brightness,0x5 I2c set brightness
     {0xff, 0xff},  //ending flag
 };
@@ -157,6 +164,44 @@ void usart_send_line(const char *s) {
 }
 
 
+void USART1_IRQHandler() {
+    unsigned char received;
+
+    if ((USART_GetITStatus(USART1, USART_IT_RXNE) != RESET)) {
+        received = USART_ReceiveData(USART1);
+
+        if (received == CR) {
+            g_usart_buf[usart_buf_length] = 0;
+            //usart_send_newline();
+            //command_parse();
+            cmd_received = 1;
+            usart_buf_length = 0;
+        } else if (received == LF) {
+            // ignore
+        } else {
+            if (usart_buf_length == COMMAND_MAX_LENGTH) {
+                usart_send_newline();
+                usart_send_line(COMMAND_TOO_LONG);
+                usart_buf_length = 0;
+                return;
+
+            }
+
+            g_usart_buf[usart_buf_length++] = received;
+
+            // echo
+            //usart_send(received);
+        }
+    }
+}
+
+void delay(u16 num)
+{
+  u16 i,j;
+  for(i=0;i<num;i++)
+    for(j=0;j<0x800;j++);
+}
+
 void command_parse() {
 
     int i = 0;
@@ -170,9 +215,8 @@ void command_parse() {
         i++;
         cmd_key_num = i;
     }
-		//printf("CMD KEY:%s\t",g_tokens[0]);
+    //printf("CMD KEY:%s\t",g_tokens[0]);
     //printf("\n");
-    
     if(!strncmp(g_tokens[0],"HELP",strlen("HELP")))
     {
         cmd_id = HELP;
@@ -204,6 +248,14 @@ void command_parse() {
     else if(!strncmp(g_tokens[0],"BLSWITCH",strlen("BLSWITCH")))
     {
         cmd_id = BLSWITCH;
+    }
+    else if(!strncmp(g_tokens[0],"SET2DCTRLMODE",strlen("SET2DCTRLMODE")))
+    {
+        cmd_id = SET2DCTRLMODE;
+    }
+    else if(!strncmp(g_tokens[0],"BLSETPWM",strlen("BLSETPWM")))
+    {
+        cmd_id = BLSETPWM;
     }
     else if(!strncmp(g_tokens[0],"BLSETTINGSGET",strlen("BLSETTINGSGET")))
     {
@@ -264,45 +316,6 @@ void command_parse() {
 }
 
 
-
-void USART1_IRQHandler() {
-    unsigned char received;
-
-    if ((USART_GetITStatus(USART1, USART_IT_RXNE) != RESET)) {
-        received = USART_ReceiveData(USART1);
-
-        if (received == CR) {
-            g_usart_buf[usart_buf_length] = 0;
-            //usart_send_newline();
-            //command_parse();
-            cmd_received = 1;
-            usart_buf_length = 0;
-        } else if (received == LF) {
-            // ignore
-        } else {
-            if (usart_buf_length == COMMAND_MAX_LENGTH) {
-                usart_send_newline();
-                usart_send_line(COMMAND_TOO_LONG);
-                usart_buf_length = 0;
-                return;
-
-            }
-
-            g_usart_buf[usart_buf_length++] = received;
-
-            // echo
-            //usart_send(received);
-        }
-    }
-}
-
-void delay(u16 num)
-{
-  u16 i,j;
-  for(i=0;i<num;i++)
-    for(j=0;j<0x800;j++);
-}
-
 int init_chip_8556()
 {
     uint8_t tData[3];
@@ -362,7 +375,7 @@ void dump_chip_8556()
 
 int is_flash_new()
 {
-    //在page8设置标志位，第一次运行设置默认值  
+    //在page51设置标志位，第一次运行设置默认值  
     uint32_t *read_p = (uint32_t *)PAGE_ADDR(51);
     if(*read_p == 0x5a5b5c)
         return 0;
@@ -380,6 +393,17 @@ void set_flash_tag()
     uint32_t wrtie_data = 0x5a5b5c;
     
     FLASH_ProgramWord(write_addr,wrtie_data);
+
+    //write board info into flash
+    write_addr += 4;
+    uint32_t *wrtie_data_p = (uint32_t *)board_info;
+    for(int i = 0;i < 32;i++)
+    {
+        //write data into flash
+        FLASH_ProgramWord(write_addr,*wrtie_data_p);
+        write_addr += 4;
+        wrtie_data_p++;
+    }
     
     FLASH_Lock();
 
@@ -397,7 +421,7 @@ void brightness_init()
         uint32_t write_addr = PAGE_ADDR(50);
 
         uint32_t *wrtie_data_p = g_setting;
-        for(int i = 0;i < 6;i++)
+        for(int i = 0;i < STORE_LEN;i++)
         {
             //write data into flash
             FLASH_ProgramWord(write_addr,*wrtie_data_p);
@@ -528,22 +552,6 @@ void set_sys_brightness(uint8_t brightness)
     {
         blu_brightness_2d = brightness * ((double)g_setting[mode2ratio3d_index] / 100.0);
     }
-    uint8_t ibrightness_read = 0;
-        
-    printf("\r\nbrightness:%d\r\n",blu_brightness_2d);
-    
-    ee_WRITE_BYTES(BRIGHTNESS_CONTROL,&blu_brightness_2d,1);
-
-    ee_READ_BYTES(BRIGHTNESS_CONTROL,&ibrightness_read,1);
-
-    if(brightness == ibrightness_read)
-    {
-        usart_send_line("2d set successfully!");
-    }
-    else
-    {
-        usart_send_line("2d set failed!");
-    }
 
     //set 3d brightness, use pwm duty to set brightness
     int blu_brightness_3d = 0;
@@ -557,7 +565,36 @@ void set_sys_brightness(uint8_t brightness)
     }
 
     int duty_3d = (blu_brightness_3d / 255.0) * DUTY_MAX_3D;
-    ADVANCE_TIM_Mode_Config(2048,duty_3d);
+
+    
+    uint8_t ibrightness_read = 0;
+        
+    printf("\r\nbrightness:%d\r\n",blu_brightness_2d);
+
+    if(g_setting[ctrlmode2d_index] == I2C_CTRL)
+    {
+        ee_WRITE_BYTES(BRIGHTNESS_CONTROL,&blu_brightness_2d,1);
+        
+        ee_READ_BYTES(BRIGHTNESS_CONTROL,&ibrightness_read,1);
+        
+        if(brightness == ibrightness_read)
+        {
+            usart_send_line("2d set successfully!");
+        }
+        else
+        {
+            usart_send_line("2d set failed!");
+        }
+        ADVANCE_2D_PWM_Config(2048);
+        ADVANCE_3D_PWM_Config(duty_3d);
+    }
+    else
+    {
+        int duty_2d = (blu_brightness_2d / 255.0) * 4096;
+        ADVANCE_2D_PWM_Config(duty_2d);
+        ADVANCE_3D_PWM_Config(duty_3d);
+    }
+    
 }
 
 void mode_switch()
@@ -673,6 +710,20 @@ void mode_set_ratio()
     
 }
 
+void display_boardinfo()
+{
+    uint32_t read_addr = PAGE_ADDR(51) + 4;
+    char *p = (char *)read_addr;
+    char info[128] = "";
+    for(int i = 0; i < 128; i++)
+    {
+        info[i] = *p;
+        p++;
+    }
+    
+    printf("BOARD INFO:\r\n%s\r\n",info);
+}
+
 void setting_get()
 {
     if(cmd_key_num != 1)
@@ -682,18 +733,28 @@ void setting_get()
     }
 
     get_flash_setting();
-    int brightness = 0;
+    int brightness = g_setting[brightness_index];
+	int mode = g_setting[mode_index];
     double mode2_ratio_2d = g_setting[mode2ratio2d_index] / 100.0;
     double mode2_ratio_3d = g_setting[mode2ratio3d_index] / 100.0;
     double mode3_ratio_2d = g_setting[mode3ratio2d_index] / 100.0;
     double mode3_ratio_3d = g_setting[mode3ratio3d_index] / 100.0;
-    double current_2d = (double)brightness / g_setting[mode2ratio2d_index] /255 * 25.00;
-    double current_3d = (double)brightness / g_setting[mode2ratio3d_index] /255 * 14.00;
-    printf("Display current system configurations:\r\n");		
-    printf("brightness: %d\r\n",brightness);
+	
+    double current_2d = (mode == 2) ? ((double)brightness / mode2_ratio_2d /255.0 * 25.00) : ((double)brightness / mode3_ratio_2d /255.0 * 25.00);
+    double current_3d = (mode == 2) ? ((double)brightness / mode2_ratio_3d /255.0 * 14.00) : ((double)brightness / mode3_ratio_3d /255.0 * 14.00);
+    printf("Display current system configurations:\r\n");
+    if(g_setting[ctrlmode2d_index] == I2C_CTRL)
+    {
+        printf("brightness: %d\r\n2d control mode: i2c\r\n",brightness);
+    }
+    else
+    {
+        printf("brightness: %d\r\n2d control mode: pwm\r\n",brightness);
+    }
+
     printf("+------+----------+----------+------------+------------+\r\n");
     printf("| mode | 2D_ratio | 3D_ratio | 2D_current | 3D_current |\r\n");
-    if(g_setting[mode_index] == 2)
+    if(mode == 2)
     {
         printf("+------+----------+----------+------------+------------+\r\n");
         printf("|%-6d|%-10.2f|%-10.2f|%-12.2f|%-12.2f|\r\n",2,mode2_ratio_2d,mode2_ratio_3d,current_2d,current_3d);
@@ -732,19 +793,29 @@ void set_2d_current()
     
     int brightness = current / 25.00 * 255;
     uint8_t ibrightness_read = 0;
-		
-    uint8_t brightness_set = (uint8_t)brightness;
-    ee_WRITE_BYTES(BRIGHTNESS_CONTROL,&brightness_set,1);
 
-    ee_READ_BYTES(BRIGHTNESS_CONTROL,&ibrightness_read,1);
-
-    if(brightness == ibrightness_read)
+    if(g_setting[ctrlmode2d_index] == I2C_CTRL)
     {
-        printf("2d set successfully! This setting is temporary. Now temp brightness is %d\r\n",ibrightness_read);
+        uint8_t brightness_set = (uint8_t)brightness;
+        ee_WRITE_BYTES(BRIGHTNESS_CONTROL,&brightness_set,1);
+    
+        ee_READ_BYTES(BRIGHTNESS_CONTROL,&ibrightness_read,1);
+    
+        if(brightness == ibrightness_read)
+        {
+            printf("2d set successfully! This setting is temporary. Now temp brightness is %d\r\n",ibrightness_read);
+        }
+        else
+        {
+            usart_send_line("2d set failed!");
+        }
     }
     else
+
     {
-        usart_send_line("2d set failed!");
+        int brightness = current / 14.00 * 255;
+        int duty_2d = (brightness / 255.0) * 4096; 
+        ADVANCE_2D_PWM_Config(duty_2d); 
     }
     
 }
@@ -773,8 +844,52 @@ void set_3d_current()
     int brightness = current / 14.00 * 255;
 
     int duty_3d = (brightness / 255.0) * DUTY_MAX_3D;
-    ADVANCE_TIM_Mode_Config(2048,duty_3d);
+    ADVANCE_3D_PWM_Config(duty_3d); 
 
+}
+
+void set_2dctrmode()
+{
+    if(cmd_key_num != 2)
+    {
+        usart_send_line(WRONG_FORMAT);
+        return;
+    }
+
+    int mode = atoi(g_tokens[1]);
+    if(mode != 0 && mode != 1)
+    {
+        printf("[ERROR]mode should be 0(i2c) or 1(pwm).");
+        return;
+    }
+
+    uint8_t read_data = 0;
+    uint8_t address = 0x01;
+    uint8_t value = 0;
+
+    g_setting[ctrlmode2d_index] = mode;
+    save_setting_in_flash();
+    if(mode == I2C_CTRL)
+    {
+        value = 5;
+        ee_WRITE_BYTES(address, &value, 1);
+        ee_READ_BYTES(address, &read_data, 1);
+        if(value == read_data)
+        {
+            printf("use i2c to control 8556.\r\n");
+        }
+    }
+    else
+    {
+        value = 1;
+        ee_WRITE_BYTES(address, &value, 1);
+        ee_READ_BYTES(address, &read_data, 1);
+        if(value == read_data)
+        {
+            printf("use pwm to control 8556.\r\n");
+        }
+    }
+    
 }
 
 void set_pwm()
@@ -794,13 +909,40 @@ void set_pwm()
         return;
     }
 
-    if(duty < 0.00 || duty > 1024)
+    if(duty < 0.00 || duty > 4096)
     {
         usart_send_line("duty error,duty can only be 0~1024");
         return;
     }
 
-    ADVANCE_TIM_Mode_Config(2048,duty);   
+    if(mode == 2)
+    {
+        ADVANCE_2D_PWM_Config(duty);  
+    }
+    else
+    {
+        ADVANCE_3D_PWM_Config(duty);  
+    }
+}
+
+void gpio_read()
+{
+
+}
+
+void gpio_readpin()
+{
+
+}
+
+void gpio_setpin()
+{
+
+}
+
+void gpio_clrpin()
+{
+
 }
 
 void clear_cmd_info(void)
@@ -822,6 +964,12 @@ void handle_command()
         case DUMP:
         {                
             dump_chip_8556();
+            clear_cmd_info();
+            break;
+        }
+        case INFO:
+        {                
+            display_boardinfo();
             clear_cmd_info();
             break;
         }
@@ -849,8 +997,15 @@ void handle_command()
         }
         case BLSETBRIGHTNESS:
         {
-            uint8_t brightness = atoi(g_tokens[1]);
+            int brightness = atoi(g_tokens[1]);
+            if(brightness > 255 || brightness < 0)
+            {
+                printf("[ERROR]brightness value should be 0~255.");
+                break;
+            }
             set_sys_brightness(brightness);
+            g_setting[brightness_index] = brightness;
+            save_setting_in_flash();
 
             clear_cmd_info();
             break;
@@ -882,6 +1037,12 @@ void handle_command()
         case BLSETPWM:
         {
             set_pwm();
+            clear_cmd_info();       
+            break; 
+        }
+        case SET2DCTRLMODE:
+        {
+            set_2dctrmode();
             clear_cmd_info();       
             break; 
         }
