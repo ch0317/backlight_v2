@@ -51,7 +51,7 @@ void ADVANCE_2D_PWM_Config(int duty_2d)
     /* Compute CCR1 value to generate a duty cycle at 50% for channel 1 and 1N */
     int Channel1Pulse = (uint16_t) (((uint32_t) duty_2d * (TimerPeriod - 1)) / 4096);
 
-    printf("Channel1Pulse:%d\n",Channel1Pulse);
+    //printf("duty:%d/4096\n",Channel1Pulse);
     /* Time Base configuration */
     TIM_TimeBaseStructure.TIM_Prescaler = 0;
     TIM_TimeBaseStructure.TIM_CounterMode = TIM_CounterMode_Up;
@@ -123,6 +123,7 @@ void ADVANCE_3D_PWM_Config(int duty_3d)
 
 
     int Channel3Pulse = (uint16_t) (((uint32_t) duty_3d * (TimerPeriod - 1)) / 4096);
+    //printf("duty:%d/4096\n",Channel3Pulse);
     TIM_OCInitStructure.TIM_Pulse = Channel3Pulse;
     TIM_OC3Init(TIM1, &TIM_OCInitStructure);
     TIM_OC3PreloadConfig(TIM1, TIM_OCPreload_Enable);
@@ -136,9 +137,4 @@ void ADVANCE_3D_PWM_Config(int duty_3d)
 }
 
 
-void ADVANCE_TIM_Init(void)
-{
-    ADVANCE_TIM_GPIO_Config();
-    ADVANCE_2D_PWM_Config(2048);
-    ADVANCE_3D_PWM_Config(2048);
-}
+

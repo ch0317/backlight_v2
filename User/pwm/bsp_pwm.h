@@ -23,7 +23,7 @@
 void ADVANCE_TIM_Init(void);
 void ADVANCE_2D_PWM_Config(int duty_2d);
 void ADVANCE_3D_PWM_Config(int duty_3d);
-
+void ADVANCE_TIM_GPIO_Config(void);
 
 
 #endif
