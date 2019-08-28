@@ -195,4 +195,183 @@ r_fail:
 	return 0;	
 }
 
+
+uint8_t ee_1_CHECK_DEVICE(uint8_t addr)
+{
+	uint8_t result;
+	
+	i2c1_START();
+	
+	//发送EEPROM设备地址
+	i2c1_WRITE_BYTE(addr);
+	
+	if(i2c1_WAIT_ASK())
+	{
+		result = 1;
+	}
+	else
+	{
+		result = 0;
+	} 
+	
+	i2c1_NASK();
+	
+	i2c1_STOP();
+	
+	return result;
+	
+}
+
+//等待EEPROM内部时序完成
+//1表示超时
+//0表示完成
+uint8_t ee_1_WAIT_STANDPY(void)
+{	
+	uint16_t cycle = 0;
+	
+	while(ee_1_CHECK_DEVICE(WRITE_DIR_8556))
+	{
+		cycle++;
+		if(cycle>=10000)
+			return 1;
+	}
+	
+	return 0;
+}
+
+
+//往EEPROM写入一个字节
+//正常：1 错误：0
+uint8_t ee_1_WRITE_BYTES(uint8_t w_addr,uint8_t *data,uint16_t size)
+{		
+	
+	uint16_t i;
+	
+	for(i=0;i<size;i++)
+	{
+		if(i==0 || (w_addr)%8 == 0)
+		{		
+			i2c1_STOP();
+			
+			if(ee_1_WAIT_STANDPY())
+				goto w_fail;	
+			
+			i2c1_START();
+			
+			//发送EEPROM设备地址
+			i2c1_WRITE_BYTE(WRITE_DIR_8556);
+			
+			if(i2c1_WAIT_ASK())
+			{
+				goto w_fail;
+			}
+			else
+			{		
+				//发送要写入的存储单元格地址
+				i2c1_WRITE_BYTE(w_addr);
+				
+				if(i2c1_WAIT_ASK())
+				{
+					goto w_fail;
+				}
+			}
+		}					
+	
+		//发送要写入的数据
+		i2c1_WRITE_BYTE(*data);	
+		
+		if(i2c1_WAIT_ASK())
+		{
+			goto w_fail;
+		}
+		data++;
+		w_addr++;
+	
+	}	
+	
+	i2c1_STOP();
+
+	if(ee_1_WAIT_STANDPY())
+		goto w_fail;	
+	
+	return 1;
+
+w_fail:	
+	i2c1_STOP();
+	return 0;	
+}
+
+
+
+//从EEPROM读取一个字节
+//正常：1 错误：0
+uint8_t ee_1_READ_BYTES(uint8_t r_addr,uint8_t *data,uint16_t size)
+{
+	if(ee_1_WAIT_STANDPY())
+		goto r_fail;
+	
+	i2c1_START();
+	
+	//发送EEPROM设备地址
+	i2c1_WRITE_BYTE(WRITE_DIR_8556);
+	
+	if(i2c1_WAIT_ASK())
+	{
+		goto r_fail;
+	}
+	else
+	{
+		
+		//发送要读取的存储单元格地址
+		i2c1_WRITE_BYTE(r_addr);
+		
+		if(i2c1_WAIT_ASK())
+		{
+			goto r_fail;
+		}
+		else
+		{
+			//发送第二次起始信号
+			i2c1_START();
+			
+			//发送第二次设备地址，读方式
+			i2c1_WRITE_BYTE(READ_DIR_8556);
+			
+			if(i2c1_WAIT_ASK())
+			{
+				goto r_fail;
+			}
+			else
+			{				
+				uint16_t i;
+				for(i=0;i<size;i++)
+				{
+					*data = i2c1_READ_BYTE();
+					
+					if(i == size-1)
+					{
+						i2c1_NASK();//接收数据够了，产生非应答信号
+					}
+					else	
+					{						
+						i2c1_ASK();
+					}
+					
+					data++;//指针指向下一个缓冲区
+				}
+			} 			
+		}
+	}
+	
+	i2c1_STOP();
+	return 1;
+
+r_fail:	
+	i2c1_NASK();
+	i2c1_STOP();
+	return 0;	
+}
+
+
+
 /*********************************************END OF FILE**********************/

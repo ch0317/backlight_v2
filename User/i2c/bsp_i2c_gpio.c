@@ -37,12 +37,19 @@ void i2c_GPIO_Config(void)
 	
 		GPIO_Init(I2C_SCL_GPIO_PORT, &GPIO_InitStructure);	
 		
-	//SDA
+		//SDA
 	
 		GPIO_InitStructure.GPIO_Pin = I2C_SDA_GPIO_PIN;
 	
-		GPIO_Init(I2C_SDA_GPIO_PORT, &GPIO_InitStructure);		
+		GPIO_Init(I2C_SDA_GPIO_PORT, &GPIO_InitStructure);
 
+		// NEW ADD I2C
+		//SDA1
+		GPIO_InitStructure.GPIO_Pin = I2C_SDA_GPIO_PIN_1;	
+		GPIO_Init(I2C_SDA_GPIO_PORT, &GPIO_InitStructure);
+		//SCL1
+		GPIO_InitStructure.GPIO_Pin = I2C_SCL_GPIO_PIN_1;	
+		GPIO_Init(I2C_SCL_GPIO_PORT, &GPIO_InitStructure);
 
 }
 #else
@@ -226,6 +233,147 @@ uint8_t i2c_READ_BYTE(void)
 }
 
 
+
+
+
+//产生起始信号
+void i2c1_START(void)
+{
+	EEPROM_I2C_SDA1_1();	
+	EEPROM_I2C_SCL1_1();
+	i2c_Delay();
+	
+	EEPROM_I2C_SDA1_0();	
+	i2c_Delay();
+	EEPROM_I2C_SCL1_0();
+	i2c_Delay();
+	
+}
+
+
+//产生结束信号
+void i2c1_STOP(void)
+{
+	EEPROM_I2C_SDA1_0();	
+	EEPROM_I2C_SCL1_1();
+	i2c_Delay();
+	
+	EEPROM_I2C_SDA1_1();	
+	i2c_Delay();	
+}
+
+//产生应答信号
+void i2c1_ASK(void)
+{
+	EEPROM_I2C_SDA1_0();	
+	
+	EEPROM_I2C_SCL1_1();
+	i2c_Delay();
+	
+	EEPROM_I2C_SCL1_0();
+	i2c_Delay();	
+	
+	EEPROM_I2C_SDA1_1();	//释放控制权
+	i2c_Delay();	
+}
+
+//产生非应答信号
+void i2c1_NASK(void)
+{
+	EEPROM_I2C_SDA1_1();	
+	
+	EEPROM_I2C_SCL1_1();
+	i2c_Delay();
+	
+	EEPROM_I2C_SCL1_0();
+	i2c_Delay();		
+}
+
+
+//等待应答信号 NASK：1   ASK：0
+uint8_t i2c1_WAIT_ASK(void)
+{
+	uint8_t reply;
+	
+	EEPROM_I2C_SDA1_1();	//释放控制权
+	
+	EEPROM_I2C_SCL1_1();
+	i2c_Delay();
+	
+	if( EEPROM_I2C_SDA1_READ()==1 )
+	{
+		reply = 1;
+	}
+	else
+	{
+		reply = 0;
+	}
+	
+	EEPROM_I2C_SCL1_0();
+	
+	i2c_Delay();	
+
+	return reply;
+}
+
+//写入一个字节
+void i2c1_WRITE_BYTE(uint8_t data)
+{
+	uint8_t i;
+	
+	for(i=0;i<8;i++)
+	{
+		if(data & 0x80)
+		{
+			EEPROM_I2C_SDA1_1();
+		}
+		else
+		{
+			EEPROM_I2C_SDA1_0();	
+		}
+		i2c_Delay();
+		
+		EEPROM_I2C_SCL1_1();
+		i2c_Delay();
+		
+		EEPROM_I2C_SCL1_0();
+		i2c_Delay();
+		
+		if(i==7)
+		{
+			EEPROM_I2C_SDA1_1(); //释放控制权
+		}
+
+		data<<=1;
+	}		
+}
+
+
+//读取一个字节
+uint8_t i2c1_READ_BYTE(void)
+{
+	uint8_t i;
+	
+	uint8_t temp = 0;
+	
+	for(i=0;i<8;i++)
+	{		
+		temp<<=1;
+		
+		EEPROM_I2C_SCL1_1();
+		i2c_Delay();
+		
+		if( EEPROM_I2C_SDA1_READ()==1 )
+		{
+			temp += 1;
+		}
+		
+		EEPROM_I2C_SCL1_0();
+		i2c_Delay();
+	}		
+	
+	return temp;
+}
 
 
 
