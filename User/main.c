@@ -13,13 +13,13 @@
 
 //#define __DEBUG__  
 #ifdef __DEBUG__  
-#define DEBUG(format,...) printf(""format"\n", __LINE__, ##__VA_ARGS__)
+#define DEBUG(format,...) printf("[debug]"format"\n", ##__VA_ARGS__)
 #else  
 #define DEBUG(format,...)  
 #endif  
 
 
-#define COMMAND_MAX_LENGTH 128
+#define COMMAND_MAX_LENGTH 64
 enum CMD_ID{
     CMD_NULL,
     HELP = 1,
@@ -50,9 +50,11 @@ enum CMD_ID{
 };
 
 // messages
-#define UNKNOWN_COMMAND  "[ERROR]unknown command"
-#define COMMAND_TOO_LONG "[ERROR]command too long"
-#define WRONG_FORMAT     "[ERROR]wrong fomart,see HELP"
+#define UNKNOWN_COMMAND  "\"ERROR\": \"UnknownCommand\",\r\n"
+#define COMMAND_TOO_LONG "{\"ERROR\": \"CommandTooLong\"}"
+#define WRONG_FORMAT     "\"ERROR\": \"WrongFormat\",\r\n"
+#define VALUE_ERROR      "\"ERROR\": \"ValueError\",\r\n"
+
 
 //内部flash写入的起始地址与结束地址
 #define WRITE_START_ADDR  ((uint32_t)0x08008000)
@@ -69,6 +71,7 @@ char board_info[128] = "v2.0    2019-8-9    Copyright(c)2019Leia,Inc";
 char cmd_buffer[COMMAND_MAX_LENGTH];
 char g_usart_buf[COMMAND_MAX_LENGTH];
 int cmd_received = 0;
+int cmd_too_long = 0;
 unsigned short usart_buf_length=0;
 char cmd_help_str[1500] =   "{\"HELP\" : \"Display all commands\",\r\n" \
                             "\"INFO\" : \"Display Board Information\",\r\n" \
@@ -182,6 +185,8 @@ void USART1_IRQHandler() {
 
     if ((USART_GetITStatus(USART1, USART_IT_RXNE) != RESET)) {
         received = USART_ReceiveData(USART1);
+        if(cmd_received)
+            return;
 
         if (received == CR) {
             g_usart_buf[usart_buf_length] = 0;
@@ -192,9 +197,11 @@ void USART1_IRQHandler() {
         } else if (received == LF) {
             // ignore
         } else {
-            if (usart_buf_length == COMMAND_MAX_LENGTH) {
+            if (usart_buf_length >= COMMAND_MAX_LENGTH) {
                 usart_send_newline();
-                usart_send_line(COMMAND_TOO_LONG);
+                //printf(COMMAND_TOO_LONG);
+                cmd_received = 1;
+                cmd_too_long = 1;
                 usart_buf_length = 0;
                 return;
 
@@ -278,6 +285,20 @@ int init_chip_8556(uint8_t chip_id)
     return 0;
 }
 
+int help_info()
+{
+    if(cmd_key_num == 1)
+    {
+        printf("\"Commands\" : \r\n%s,\r\n",cmd_help_str);
+        return 0;
+    }
+    else
+    {
+        printf(WRONG_FORMAT);
+        return -1;
+    }
+}
+
 int dump_chip_8556(uint8_t chip_id)
 {
     uint8_t tData[3];
@@ -290,7 +311,7 @@ int dump_chip_8556(uint8_t chip_id)
         if (i2c_init_table[i][0] == 0xff) {    //special mark
             if (i2c_init_table[i][1] == 0xff) { //ending flag
                 ending_flag = 1;
-				printf("{\"address\" : %d ,\"val\" : %d}\r\n",0xaf,0xff);
+                printf("{\"address\" : %d ,\"val\" : %d}\r\n",0xaf,0xff);
             }
         }
         else {
@@ -318,17 +339,17 @@ int i2c_read_8556(uint8_t chip_id)
 {
     if(cmd_key_num != 2)
     {
-        usart_send_line(WRONG_FORMAT);
         return -1;
     }
     char *str = NULL;
     
     uint8_t read_data = 0;
     int address_input = strtol(g_tokens[1],&str,16);
+    
     if(address_input > 255 || address_input < 0 || (*str) != '\0')
     {
         usart_send_line("[ERROR]address can only be a 8 bit HEX num!");
-        return -1;
+        return -2;
     }
     
     uint8_t address = (uint8_t)address_input;
@@ -363,13 +384,13 @@ int i2c_write_8556(uint8_t chip_id)
     if(address_input > 255 || address_input < 0 || (*str) != '\0')
     {
         usart_send_line("[ERROR]address can only be a uint8 HEX num!");
-        return -1;
+        return -2;
     }
     int value_input = strtol(g_tokens[2],&str,16);
     if(value_input > 255 || value_input < 0 || (*str) != '\0')
     {
         usart_send_line("[ERROR]value can only be a uint8 HEX num!");
-        return -1;
+        return -2;
     }
 
     uint8_t read_data = 0;
@@ -397,7 +418,7 @@ int i2c_write_8556(uint8_t chip_id)
     else
     {
         //printf("The result is not correct!");
-        return -1;
+        return -3;
     }
     
     return 0;
@@ -523,7 +544,7 @@ void brightness_init()
 void init()
 {
     int ret = 0;
-	delay(500);
+    delay(500);
     USART_Config();
     ADVANCE_TIM_GPIO_Config();
     //ADVANCE_2D_PWM_Config(2048);
@@ -657,6 +678,7 @@ int mode_switch()
     if(cmd_key_num != 2)
     {
         usart_send_line(WRONG_FORMAT);
+        printf(WRONG_FORMAT);
         return -1;
     }
 
@@ -664,6 +686,7 @@ int mode_switch()
     if(mode != 2 && mode != 3)
     {
         usart_send_line("[ERROR]mode must be 2 or 3!");
+        printf(VALUE_ERROR);
         return -1;
     }
 
@@ -728,7 +751,7 @@ int mode_set_ratio()
 {
     if(cmd_key_num != 4)
     {
-        usart_send_line(WRONG_FORMAT);
+        printf(WRONG_FORMAT);
         return -1;
     }
 
@@ -740,12 +763,26 @@ int mode_set_ratio()
     if((mode != 2 && mode != 3) || (*str1 != '\0') || (*str2 != '\0'))
     {
         usart_send_line("mode or ratio illegal");
+        printf(VALUE_ERROR);
+        return -1;
+    }
+
+    if(strncmp(g_tokens[2],"0",strlen("0")) && ratio_2d == 0)
+    {
+        printf(VALUE_ERROR);
+        return -1;
+    }
+
+    if(strncmp(g_tokens[3],"0",strlen("0")) && ratio_3d == 0)
+    {
+        printf(VALUE_ERROR);
         return -1;
     }
 
     if(ratio_2d > 1.00 || ratio_2d < 0.00 || ratio_3d > 3.00 || ratio_3d < 0.00)
     {
         usart_send_line("ratio error,ratio_2d:0.00~1.00 ,ratio_3d:0.00~3.00");
+        printf(VALUE_ERROR);
         return -1;
     }
 
@@ -768,6 +805,12 @@ int mode_set_ratio()
 
 int display_boardinfo()
 {
+    if(cmd_key_num != 1)
+    {
+        printf(WRONG_FORMAT);
+        return -1;
+    }
+    
     uint32_t read_addr = PAGE_ADDR(55) + 4;
     char *p = (char *)read_addr;
     char info[128] = "";
@@ -781,12 +824,12 @@ int display_boardinfo()
     return 0;
 }
 
-void setting_get()
+int setting_get()
 {
     if(cmd_key_num != 1)
     {
-        usart_send_line(WRONG_FORMAT);
-        return;
+        printf(WRONG_FORMAT);
+        return -1;
     }
 
     get_flash_setting();
@@ -825,6 +868,7 @@ void setting_get()
     }
 
     //usart_send_line("+------+----------+----------+------------+------------+\r\n\r\n");
+    return 0;
 }
 
 int set_2d_current()
@@ -832,6 +876,7 @@ int set_2d_current()
     if(cmd_key_num != 2)
     {
         usart_send_line(WRONG_FORMAT);
+        printf(WRONG_FORMAT);
         return -1;
     }  
 
@@ -841,12 +886,14 @@ int set_2d_current()
     if((*str != '\0'))
     {
         usart_send_line("current illegal");
+        printf(VALUE_ERROR);
         return -1;
     }
 
     if(current > 25.00 || current < 0.00)
     {
         usart_send_line("current error,current:0.00~25.00");
+        printf(VALUE_ERROR);
         return -1;
     }
     
@@ -891,6 +938,7 @@ int set_3d_current()
     if(cmd_key_num != 2)
     {
         usart_send_line(WRONG_FORMAT);
+        printf(WRONG_FORMAT);
         return -1;
     }  
 
@@ -900,12 +948,14 @@ int set_3d_current()
     if((*str != '\0'))
     {
         usart_send_line("current illegal\r\n");
+        printf(VALUE_ERROR);
         return -1;
     }
 
     if(current > 30.00 || current < 0.00)
     {
         usart_send_line("current error,current:0.00~30.00\r\n");
+        printf(VALUE_ERROR);
         return -1;
     }
 
@@ -921,13 +971,22 @@ int set_2dctrmode()
     if(cmd_key_num != 2)
     {
         usart_send_line(WRONG_FORMAT);
+        printf(WRONG_FORMAT);
         return -1;
     }
 
     int mode = atoi(g_tokens[1]);
+
+    if(strncmp(g_tokens[1],"0",strlen("0")) && mode == 0)
+    {
+        printf(VALUE_ERROR);
+        return -1;
+    }
+    
     if(mode != 0 && mode != 1)
     {
-        printf("[ERROR]mode should be 0(i2c) or 1(pwm).\r\n");
+        usart_send_line("[ERROR]mode should be 0(i2c) or 1(pwm).");
+        printf(VALUE_ERROR);
         return -1;
     }
 
@@ -997,6 +1056,7 @@ int set_pwm()
     if(cmd_key_num != 3)
     {
         usart_send_line(WRONG_FORMAT);
+        printf(WRONG_FORMAT);
         return -1;
     }  
 
@@ -1006,12 +1066,20 @@ int set_pwm()
     if((mode != 2 && mode != 3))
     {
         usart_send_line("mode illegal");
+        printf(VALUE_ERROR);
         return -1;
     }
 
-    if(duty < 0.00 || duty > 4096)
+    if(strncmp(g_tokens[2],"0",strlen("0") && duty == 0))
+    {
+        printf(VALUE_ERROR);
+        return -1;
+    }
+
+    if(duty < 0 || duty > 4096)
     {
         usart_send_line("duty error,duty can only be 0~4096");
+        printf(VALUE_ERROR);
         return -1;
     }
 
@@ -1082,104 +1150,104 @@ void command_parse() {
     for (char *p = strtok(g_usart_buf," "); p != NULL; p = strtok(NULL, " "))
     {
         g_tokens[i] = p;
-        //printf("CMD KEY:%s\t",g_tokens[i]);
+        DEBUG("CMD KEY:%s\t",g_tokens[i]);
         i++;
         cmd_key_num = i;
     }
     //printf("\n");
-    if(!strncmp(g_tokens[0],"HELP",strlen("HELP")))
+    if(!strncmp(g_tokens[0],"HELP",strlen(g_tokens[0])))
     {
         cmd_id = HELP;
     }
-    else if(!strncmp(g_tokens[0],"INFO",strlen("INFO")))
+    else if(!strncmp(g_tokens[0],"INFO",strlen(g_tokens[0])))
     {
         cmd_id = INFO;
     }
-    else if(!strncmp(g_tokens[0],"DUMP",strlen("DUMP")))
+    else if(!strncmp(g_tokens[0],"DUMP",strlen(g_tokens[0])))
     {
         cmd_id = DUMP;
     }
-    else if(!strncmp(g_tokens[0],"I2CREAD",strlen("I2CREAD")))
+    else if(!strncmp(g_tokens[0],"I2CREAD",strlen(g_tokens[0])))
     {
         cmd_id = I2CREAD;
     }
-    else if(!strncmp(g_tokens[0],"I2CWRITE",strlen("I2CWRITE")))
+    else if(!strncmp(g_tokens[0],"I2CWRITE",strlen(g_tokens[0])))
     {
         cmd_id = I2CWRITE;
     }
-    else if(!strncmp(g_tokens[0],"BLSETBRIGHTNESS",strlen("BLSETBRIGHTNESS")))
+    else if(!strncmp(g_tokens[0],"BLSETBRIGHTNESS",strlen(g_tokens[0])))
     {
         cmd_id = BLSETBRIGHTNESS;
     }
-    else if(!strncmp(g_tokens[0],"BLSETRATIOS",strlen("BLSETRATIOS")))
+    else if(!strncmp(g_tokens[0],"BLSETRATIOS",strlen(g_tokens[0])))
     {
         cmd_id = BLSETRATIOS;
     }
-    else if(!strncmp(g_tokens[0],"BLSWITCH",strlen("BLSWITCH")))
+    else if(!strncmp(g_tokens[0],"BLSWITCH",strlen(g_tokens[0])))
     {
         cmd_id = BLSWITCH;
     }
-    else if(!strncmp(g_tokens[0],"SET2DCTRLMODE",strlen("SET2DCTRLMODE")))
+    else if(!strncmp(g_tokens[0],"SET2DCTRLMODE",strlen(g_tokens[0])))
     {
         cmd_id = SET2DCTRLMODE;
     }
-    else if(!strncmp(g_tokens[0],"BLSETPWM",strlen("BLSETPWM")))
+    else if(!strncmp(g_tokens[0],"BLSETPWM",strlen(g_tokens[0])))
     {
         cmd_id = BLSETPWM;
     }
-    else if(!strncmp(g_tokens[0],"BLSETTINGSGET",strlen("BLSETTINGSGET")))
+    else if(!strncmp(g_tokens[0],"BLSETTINGSGET",strlen(g_tokens[0])))
     {
         cmd_id = BLSETTINGSGET;
     }
-    else if(!strncmp(g_tokens[0],"BLSET2DCURRENT",strlen("BLSET2DCURRENT")))
+    else if(!strncmp(g_tokens[0],"BLSET2DCURRENT",strlen(g_tokens[0])))
     {
         cmd_id = BLSET2DCURRENT;
     }
-    else if(!strncmp(g_tokens[0],"BLSET3DCURRENT",strlen("BLSET3DCURRENT")))
+    else if(!strncmp(g_tokens[0],"BLSET3DCURRENT",strlen(g_tokens[0])))
     {
         cmd_id = BLSET3DCURRENT;
     }
-    else if(!strncmp(g_tokens[0],"POKE32",strlen("POKE32")))
+    else if(!strncmp(g_tokens[0],"POKE32",strlen(g_tokens[0])))
     {
         cmd_id = POKE32;
     }
-    else if(!strncmp(g_tokens[0],"POKE16",strlen("POKE16")))
+    else if(!strncmp(g_tokens[0],"POKE16",strlen(g_tokens[0])))
     {
         cmd_id = POKE16;
     }
-    else if(!strncmp(g_tokens[0],"POKE8",strlen("POKE8")))
+    else if(!strncmp(g_tokens[0],"POKE8",strlen(g_tokens[0])))
     {
         cmd_id = POKE8;
     }
-    else if(!strncmp(g_tokens[0],"PEEK32",strlen("PEEK32")))
+    else if(!strncmp(g_tokens[0],"PEEK32",strlen(g_tokens[0])))
     {
         cmd_id = PEEK32;
     }
-    else if(!strncmp(g_tokens[0],"PEEK16",strlen("PEEK16")))
+    else if(!strncmp(g_tokens[0],"PEEK16",strlen(g_tokens[0])))
     {
         cmd_id = PEEK16;
     }
-    else if(!strncmp(g_tokens[0],"PEEK8",strlen("PEEK8")))
+    else if(!strncmp(g_tokens[0],"PEEK8",strlen(g_tokens[0])))
     {
         cmd_id = PEEK8;
     }
-    else if(!strncmp(g_tokens[0],"GPIOREAD",strlen("GPIOREAD")))
+    else if(!strncmp(g_tokens[0],"GPIOREAD",strlen(g_tokens[0])))
     {
         cmd_id = GPIOREAD;
     }
-    else if(!strncmp(g_tokens[0],"GPIOREADPIN",strlen("GPIOREADPIN")))
+    else if(!strncmp(g_tokens[0],"GPIOREADPIN",strlen(g_tokens[0])))
     {
         cmd_id = GPIOREADPIN;
     }
-    else if(!strncmp(g_tokens[0],"GPIOSETPIN",strlen("GPIOSETPIN")))
+    else if(!strncmp(g_tokens[0],"GPIOSETPIN",strlen(g_tokens[0])))
     {
         cmd_id = GPIOSETPIN;
     }
-    else if(!strncmp(g_tokens[0],"GPIOCLRPIN",strlen("GPIOCLRPIN")))
+    else if(!strncmp(g_tokens[0],"GPIOCLRPIN",strlen(g_tokens[0])))
     {
         cmd_id = GPIOCLRPIN;
     }
-    else if(!strncmp(g_tokens[0],"BLFACTORYRESET",strlen("BLFACTORYRESET")))
+    else if(!strncmp(g_tokens[0],"BLFACTORYRESET",strlen(g_tokens[0])))
     {
         cmd_id = BLFACTORYRESET;
     }
@@ -1196,14 +1264,21 @@ void handle_command()
     switch(cmd_id){
         case HELP:
         {
-            printf("\"Commands\" : \r\n%s,\r\n",cmd_help_str);
-			//get_flash_setting();
+            ret = help_info();
             clear_cmd_info();
-            result_suffix(0);
+            result_suffix(ret);
             break;
         }      
         case DUMP: 
         {                
+            if(cmd_key_num != 1)
+            {
+                printf(WRONG_FORMAT);
+                ret = -1;
+                clear_cmd_info();
+                result_suffix(ret);
+                break;
+            }
             dump_chip_8556(0);
             dump_chip_8556(1);
             clear_cmd_info();
@@ -1221,8 +1296,15 @@ void handle_command()
         {
             int ret = i2c_read_8556(0);
             ret |= i2c_read_8556(1);
-            if (ret != 0)
-                usart_send_line("Command I2CREAD fail.");
+            if (ret == -1)
+            {
+                printf(WRONG_FORMAT);
+            }
+            else if(ret == -2)
+            {
+                printf(VALUE_ERROR);
+            }
+
             clear_cmd_info();
             result_suffix(ret);
             break;
@@ -1231,8 +1313,15 @@ void handle_command()
         {
             int ret = i2c_write_8556(0);
             ret |= i2c_write_8556(1);
-            if (ret != 0)
-                usart_send_line("Command I2CWRITE fail.");
+            if (ret == -1)
+            {
+                printf(WRONG_FORMAT);
+            }
+            else if(ret == -2)
+            {
+                printf(VALUE_ERROR);
+            }
+            
             clear_cmd_info();
             result_suffix(ret);
             break;
@@ -1247,11 +1336,32 @@ void handle_command()
         case BLSETBRIGHTNESS:
         {
             int brightness = atoi(g_tokens[1]);
-            if(brightness > 255 || brightness < 0)
+
+            if(cmd_key_num != 2)
             {
-                usart_send_line("[ERROR]brightness value should be 0~255.\r\n");
+                printf(WRONG_FORMAT);
                 ret = -1;
                 result_suffix(ret);
+                clear_cmd_info();
+                break;
+            }
+            
+            if(strncmp(g_tokens[1],"0",strlen(g_tokens[1])) && brightness == 0)
+            {
+                printf(VALUE_ERROR);
+                ret = -1;
+                result_suffix(ret);
+                clear_cmd_info();
+                break;
+            }
+            
+            if( (brightness > 255 || brightness < 0))
+            {
+                usart_send_line("[ERROR]brightness value should be 0~255.\r\n");
+                printf(VALUE_ERROR);
+                ret = -1;
+                result_suffix(ret);
+                clear_cmd_info();
                 break;
             }
             ret = set_sys_brightness(brightness);
@@ -1271,9 +1381,9 @@ void handle_command()
         }
         case BLSETTINGSGET:
         {
-            setting_get();
+            ret = setting_get();
             clear_cmd_info(); 
-            result_suffix(0);
+            result_suffix(ret);
             break;
         }
         case BLSET2DCURRENT:
@@ -1314,12 +1424,14 @@ void handle_command()
             if((*str1) != '\0')
             {
                 usart_send_line("[ERROR]address can only be a 32 bit HEX num!");
+                clear_cmd_info();
                 break;
             }
 
             if((*str2) != '\0')
             {
                 usart_send_line("[ERROR]data can only be a 32 bit HEX num!");
+                clear_cmd_info();
                 break;
             }
 
@@ -1339,12 +1451,14 @@ void handle_command()
             if((*str1) != '\0')
             {
                 usart_send_line("[ERROR]address can only be a 16 bit HEX num!");
+                clear_cmd_info();
                 break;
             }
 
             if((*str2) != '\0' || data_input < 0 || data_input > 65535)
             {
                 usart_send_line("[ERROR]data can only be a 16 bit HEX num!");
+                clear_cmd_info();
                 break;
             }
 
@@ -1465,14 +1579,24 @@ void handle_command()
         }
         case BLFACTORYRESET:
         {
+            if(cmd_key_num != 1)
+            {
+                printf(WRONG_FORMAT);
+                result_suffix(-1);
+                clear_cmd_info();
+                break;
+            }
             factoryreset();
-            clear_cmd_info();
             result_suffix(0);
+            clear_cmd_info();
+
             break; 
         }
         case CMD_NULL:
             break;
         default:
+            printf(UNKNOWN_COMMAND);
+            result_suffix(1);
             break;
     }
 }   
@@ -1485,8 +1609,17 @@ int main(void)
     {
         if(cmd_received)
         {
-            command_parse();
-            handle_command();
+            if(cmd_too_long)
+            {
+                printf(COMMAND_TOO_LONG);
+                delay(100);
+                cmd_too_long = 0;
+            }
+            else
+            {
+                command_parse();
+                handle_command();
+            }
             cmd_received = 0;
         }
     }
