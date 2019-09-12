@@ -28,10 +28,15 @@ Project File Date:  08/28/2019
 *** Using Compiler 'V5.05 update 2 (build 169)', folder: 'C:\Keil_v5\ARM\ARMCC\Bin'
 Build target 'uart'
 compiling main.c...
+..\User\main.c(761): warning:  #177-D: variable "ret" was declared but never referenced
+      int ret = 0;
+..\User\main.c(1397): warning:  #111-D: statement is unreachable
+      return 0;
+..\User\main.c: 2 warnings, 0 errors
 linking...
-Program Size: Code=25586 RO-data=574 RW-data=1764 ZI-data=1172  
+Program Size: Code=27358 RO-data=574 RW-data=3672 ZI-data=1304  
 FromELF: creating hex file...
-"..\Output\YH-F103.axf" - 0 Error(s), 0 Warning(s).
+"..\Output\YH-F103.axf" - 0 Error(s), 2 Warning(s).
 
 <h2>Collection of Component include folders:</h2>
   F:\project_2019\back_light\back_light\Project\RTE

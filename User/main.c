@@ -7,19 +7,23 @@
 #include "./i2c/bsp_i2c_gpio.h"
 #include "./i2c/bsp_i2c_ee.h"
 
+#define bool u8
+#define false 0
+#define true 1
+
 #define CR '\r'
 #define LF '\n'
 #define CRLF "\r\n"
 
-//#define __DEBUG__  
+#define __DEBUG__  
 #ifdef __DEBUG__  
 #define DEBUG(format,...) printf("[debug]"format"\n", ##__VA_ARGS__)
 #else  
 #define DEBUG(format,...)  
 #endif  
 
+#define COMMAND_MAX_LENGTH 128
 
-#define COMMAND_MAX_LENGTH 64
 enum CMD_ID{
     CMD_NULL,
     HELP = 1,
@@ -46,8 +50,38 @@ enum CMD_ID{
     GPIOSETPIN,
     GPIOCLRPIN,
     BLFACTORYRESET,
+    setDisplayConfig,
+    getDisplayConfig,
     UNKNOWCMD = 0xff,
 };
+
+enum DISPLAY_KEY{
+    KEY_NULL,
+    DisplayClass,
+    DisplayID,
+    DisplaySizeInMm,
+    DotPitchInMm,
+    PanelResolution,
+    NumViews,
+    InterlacingMatrix1,
+    InterlacingMatrix2,
+    InterlacingVector,
+    Slant,
+    AlignmentOffset,
+    MirrorViewsX,
+    MirrorViewsY,
+    ReverseViews,
+    ActCoefficientsX,
+    ActCoefficientsY,
+    Gamma,
+    SystemDisparityPixels,
+    ConvergenceDistance,
+    CenterViewNumber,
+    ViewBoxSize,
+    ALL_CONFIG
+};
+
+
 
 // messages
 #define UNKNOWN_COMMAND  "\"ERROR\": \"UnknownCommand\",\r\n"
@@ -62,6 +96,16 @@ enum CMD_ID{
 
 #define FLASH_PAGE_SIZE   ((uint16_t)0x400) //1024
 #define PAGE_ADDR(n)      (0x08000000 + n*1024)
+
+#define CONF_PAGE1 56
+#define CONF_PAGE2 57
+#define CONF_DEFAULT_PAGE1 58
+#define CONF_DEFAULT_PAGE2 59
+
+#define SHORT_VALUE_LEN 32
+#define LONG_VALUE_LEN 128
+
+
 
 #define DUTY_MAX_3D 2400   // 2400/4096 = 58.6% ,which is PWM 3D's LIMIT
 
@@ -150,10 +194,78 @@ static unsigned char i2c_init_table[][2] = {
 };
 
 
+
+char ShortValue[16][SHORT_VALUE_LEN] = {
+    "A0",
+    "Unknown",
+    "[294,121]",
+    "[0.0766,0.056]",
+    "[3840,2160]",
+    "[8,1]",
+    "[0,0]",
+    "1",
+    "false",
+    "false",
+    "false",
+    "2.2",
+    "8",
+    "800",
+    "4",
+    "[24.6,-1]"
+};
+
+char LongValue[5][LONG_VALUE_LEN] = {
+    "[1,0,0,0,0,1,0.0013888889,0]",
+    "[0,0,1,0,1440,270,0.375,0]",
+    "[0,-0.0004629630,0,0]",
+    "[0,0,0,0,0,0,0,0,0]",
+    "[0.10000000149011612,0.0700000002902323,0.0,0.0,0.0,0.0,0.0,0.0,0.0]"
+};
+    
+typedef struct{
+    u8 conf_key;
+    bool isLong;
+    u8 index;
+    u32 address;
+    char conf_str[25];
+}ConfInfotbl;
+
+static ConfInfotbl config_info_tab[] = {
+    { DisplayClass, false, 0,    PAGE_ADDR(CONF_PAGE1), "DisplayClass"},
+    { DisplayID,    false, 1,    PAGE_ADDR(CONF_PAGE1) + SHORT_VALUE_LEN, "DisplayID"},
+    { DisplaySizeInMm, false, 2, PAGE_ADDR(CONF_PAGE1) + SHORT_VALUE_LEN * 2, "DisplaySizeInMm"},
+    { DotPitchInMm,    false, 3, PAGE_ADDR(CONF_PAGE1) + SHORT_VALUE_LEN * 3, "DotPitchInMm"},
+    { PanelResolution, false, 4, PAGE_ADDR(CONF_PAGE1) + SHORT_VALUE_LEN * 4, "PanelResolution"},
+    { NumViews,        false, 5, PAGE_ADDR(CONF_PAGE1) + SHORT_VALUE_LEN * 5, "NumViews"},
+    
+    { InterlacingMatrix1, true, 0, PAGE_ADDR(CONF_PAGE2),"InterlacingMatrix1"},
+    { InterlacingMatrix2, true, 1, PAGE_ADDR(CONF_PAGE2) + LONG_VALUE_LEN,"InterlacingMatrix2"},
+    { InterlacingVector, true, 2, PAGE_ADDR(CONF_PAGE2) + LONG_VALUE_LEN * 2, "InterlacingVector"},
+
+    
+    { Slant,            false, 6, PAGE_ADDR(CONF_PAGE1) + SHORT_VALUE_LEN * 6, "Slant"},
+    { AlignmentOffset,  false, 7, PAGE_ADDR(CONF_PAGE1) + SHORT_VALUE_LEN * 7, "AlignmentOffset"},
+    { MirrorViewsX,     false, 8, PAGE_ADDR(CONF_PAGE1) + SHORT_VALUE_LEN * 8, "MirrorViewsX"},
+    { MirrorViewsY,     false, 9, PAGE_ADDR(CONF_PAGE1) + SHORT_VALUE_LEN * 9, "MirrorViewsY"},
+    { ReverseViews,     false, 10, PAGE_ADDR(CONF_PAGE1) + SHORT_VALUE_LEN * 10, "ReverseViews"},
+
+    
+    { ActCoefficientsX, true,  3, PAGE_ADDR(CONF_PAGE2) + LONG_VALUE_LEN * 3,"ActCoefficientsX"},
+    { ActCoefficientsY, true,  4, PAGE_ADDR(CONF_PAGE2) + LONG_VALUE_LEN * 4,"ActCoefficientsY"},
+
+    { Gamma,            false, 11,      PAGE_ADDR(CONF_PAGE1) + SHORT_VALUE_LEN * 11, "Gamma"},
+    { SystemDisparityPixels, false, 12, PAGE_ADDR(CONF_PAGE1) + SHORT_VALUE_LEN * 12, "SystemDisparityPixels"},
+    { ConvergenceDistance,   false, 13, PAGE_ADDR(CONF_PAGE1) + SHORT_VALUE_LEN * 13, "ConvergenceDistance"},
+    { CenterViewNumber,      false, 14, PAGE_ADDR(CONF_PAGE1) + SHORT_VALUE_LEN * 14, "CenterViewNumber"},
+    { ViewBoxSize,           false, 15, PAGE_ADDR(CONF_PAGE1) + SHORT_VALUE_LEN * 15, "ViewBoxSize"}
+};
+
 void get_flash_setting(void);
 void save_setting_in_flash(void);
 void set_flash_tag(void);
 int set_sys_brightness(uint8_t brightness);
+int is_flash_new(void);
+
 
 // send one byte through USART
 void usart_send(const char chr) {
@@ -210,6 +322,109 @@ void USART1_IRQHandler() {
             g_usart_buf[usart_buf_length++] = received;
 
         }
+    }
+}
+
+u32 get_key_address(u8 conf_key)
+{
+    int i = 0;
+    for(i = 0; i < (sizeof(config_info_tab) / sizeof(ConfInfotbl)); i++)
+    {
+        if(config_info_tab[i].conf_key == conf_key)
+        {
+            return config_info_tab[i].address;
+        }
+    }
+
+    return 0xff;
+}
+
+u32 get_key_index(u8 conf_key)
+{
+    int i = 0;
+    for(i = 0; i < (sizeof(config_info_tab) / sizeof(ConfInfotbl)); i++)
+    {
+        if(config_info_tab[i].conf_key == conf_key)
+        {
+            return config_info_tab[i].index;
+        }
+    }
+
+    return 0xff;
+}
+
+
+u8 get_conf_id()
+{
+    int i = 0;
+    DEBUG("g_tokens[1]:%s\n",g_tokens[1]);
+
+    if(g_tokens[1] == NULL && cmd_id == getDisplayConfig)
+    {
+        return ALL_CONFIG;
+    }
+
+    for(i = 0; i < (sizeof(config_info_tab) / sizeof(ConfInfotbl)); i++)
+    {
+        char *p = config_info_tab[i].conf_str;
+
+        if(!strcmp(g_tokens[1], p))
+        {
+            DEBUG("return conf_key:%d, p:%s\n",config_info_tab[i].conf_key,config_info_tab[i].conf_str);
+            return config_info_tab[i].conf_key;
+        }
+    }
+
+    return 0xff;
+}
+
+u32 isLongValue(u8 conf_key)
+{
+    int i = 0;
+    for(i = 0; i < (sizeof(config_info_tab) / sizeof(ConfInfotbl)); i++)
+    {
+        if(config_info_tab[i].conf_key == conf_key)
+        {
+            return config_info_tab[i].isLong;
+        }
+    }
+    return false;
+}
+
+void FLASH_WriteByte(uint32_t addr , uint8_t *p , uint16_t Byte_Num)
+{
+    uint32_t HalfWord;
+    Byte_Num = Byte_Num/2;
+    FLASH_Unlock();
+    FLASH_ClearFlag(FLASH_FLAG_BSY | FLASH_FLAG_EOP | FLASH_FLAG_PGERR | FLASH_FLAG_WRPRTERR);
+    FLASH_ErasePage(addr);
+    while(Byte_Num --)
+    {
+        HalfWord=*(p++);
+        HalfWord|=*(p++)<<8;
+        FLASH_ProgramHalfWord(addr, HalfWord);
+        addr += 2;
+    }
+    FLASH_Lock();
+}
+
+void FLASH_ReadByte(uint32_t addr , uint8_t *p , uint16_t Byte_Num)
+{
+    while(Byte_Num--)
+    {
+       *(p++)=*((uint8_t*)addr++);
+    }
+}
+
+void set_conf_to_flash()
+{
+    if(is_flash_new())
+    {
+        DEBUG("flash new, write flash.\n");
+        FLASH_WriteByte(PAGE_ADDR(CONF_DEFAULT_PAGE1), (uint8_t *)ShortValue, 512);
+        FLASH_WriteByte(PAGE_ADDR(CONF_DEFAULT_PAGE2), (uint8_t *)LongValue, 640);
+        FLASH_WriteByte(PAGE_ADDR(CONF_PAGE1), (uint8_t *)ShortValue, 512);
+        FLASH_WriteByte(PAGE_ADDR(CONF_PAGE2), (uint8_t *)LongValue, 640);
     }
 }
 
@@ -549,30 +764,31 @@ void init()
     ADVANCE_TIM_GPIO_Config();
     //ADVANCE_2D_PWM_Config(2048);
 
-    usart_send_line("init...\r\n");
-    usart_send_line ("pwm configuration is finished.\r\n");
+    DEBUG("init...\r\n");
+    DEBUG ("pwm configuration is finished.\r\n");
     i2c_GPIO_Config();
+    set_conf_to_flash();
     delay(1000);
 
     if(ee_CHECK_DEVICE(WRITE_DIR_8556) == 0)
     {
-        usart_send_line("8556 0 has been detected.\r\n");
+        DEBUG("8556 0 has been detected.\r\n");
     }
     else
     {
-        usart_send_line("8556 0 has not been detected\r\n");
+        DEBUG("8556 0 has not been detected\r\n");
     }
     
     if(ee_1_CHECK_DEVICE(WRITE_DIR_8556) == 0)
     {
-        usart_send_line("8556 1 has been detected.\r\n");
+        DEBUG("8556 1 has been detected.\r\n");
     }
     else
     {
-        usart_send_line("8556 1 has not been detected\r\n");
+        DEBUG("8556 1 has not been detected\r\n");
     }
 
-#if 1   
+#if 0   
 step1:
     ret = init_chip_8556(0);
     if(ret != 0)
@@ -1114,9 +1330,131 @@ void gpio_clrpin()
     //TODO
 }
 
+int display_config()
+{
+    //FLASH_ReadByte(PAGE_ADDR(CONF_PAGE1), (uint8_t *)ShortValue, 512);
+    int conf_id = 0;
+    u32 address = 0;
+    char short_data[SHORT_VALUE_LEN] = {0};
+    char long_data[LONG_VALUE_LEN] = {0};
+
+    conf_id = get_conf_id();
+
+	if(cmd_key_num != 2 && cmd_key_num != 1)
+    {
+        usart_send_line(WRONG_FORMAT);
+        printf(WRONG_FORMAT);
+        return -1;
+    }  
+	
+    if(conf_id == 0xff)
+    {
+        return -1;
+    }
+
+    if(conf_id == ALL_CONFIG)
+    {
+        int i = 0;
+        for(i = 0; i < (sizeof(config_info_tab) / sizeof(ConfInfotbl)); i++)
+        {
+            if(isLongValue(config_info_tab[i].conf_key))
+            {
+                
+                address = config_info_tab[i].address;
+                FLASH_ReadByte(address, (uint8_t *)long_data, LONG_VALUE_LEN);
+                printf("\"%s\": \"%s\",\n",config_info_tab[i].conf_str, long_data);
+            }
+            else
+            {
+                address = config_info_tab[i].address;
+                FLASH_ReadByte(address, (uint8_t *)short_data, SHORT_VALUE_LEN);
+                printf("\"%s\": \"%s\",\n",config_info_tab[i].conf_str, short_data);
+            }
+        }
+        
+        return 0;
+    }
+
+    if(isLongValue(conf_id))
+    {
+        address = get_key_address(conf_id);
+        DEBUG("conf_id:%x, address:%x\n", conf_id, address);
+        FLASH_ReadByte(address, (uint8_t *)long_data, LONG_VALUE_LEN);
+        printf("\"%s\": \"%s\",\n",g_tokens[1], long_data);
+        
+        return 0;
+    }
+    else
+    {
+        address = get_key_address(conf_id);
+        DEBUG("conf_id:%x, address:%x\n", conf_id, address);
+        FLASH_ReadByte(address, (uint8_t *)short_data, SHORT_VALUE_LEN);
+        printf("\"%s\": \"%s\",\n",g_tokens[1], short_data);
+        
+        return 0;
+    }
+
+    return 0;
+    //printf("%s",ShortValue[0]);
+}
+
+int set_config()
+{
+	if(cmd_key_num != 3)
+    {
+        usart_send_line(WRONG_FORMAT);
+        printf(WRONG_FORMAT);
+        return -1;
+    }  
+
+    u8 conf_id = get_conf_id();
+    
+    if(conf_id == 0xff)
+    {
+        return -1;
+    }
+
+    u8 conf_index = get_key_index(conf_id);
+
+    if(strlen(g_tokens[2]) > LONG_VALUE_LEN)
+    {
+        return -1;
+    }
+
+    if(isLongValue(conf_id))
+    {
+        char *p = (char *)LongValue[conf_index];
+        FLASH_ReadByte(PAGE_ADDR(CONF_PAGE2), (uint8_t *)LongValue, 640);
+        memset(&LongValue[conf_index], 0, LONG_VALUE_LEN);
+        strncpy(p, g_tokens[2], LONG_VALUE_LEN);
+        FLASH_WriteByte(PAGE_ADDR(CONF_PAGE2), (uint8_t *)LongValue, 640);
+		DEBUG("write conf_id:%d to CONF_PAGE2", conf_id);
+
+    }
+    else
+    {
+        char *p = (char *)ShortValue[conf_index];
+        FLASH_ReadByte(PAGE_ADDR(CONF_PAGE1), (uint8_t *)ShortValue, 512);  
+        memset(&ShortValue[conf_index], 0, SHORT_VALUE_LEN);
+        strncpy(p, g_tokens[2], SHORT_VALUE_LEN);
+        FLASH_WriteByte(PAGE_ADDR(CONF_PAGE1), (uint8_t *)ShortValue, 512);
+		DEBUG("write conf_id:%d to CONF_PAGE1", conf_id);
+    }
+    
+    return 0;
+}
+
 void factoryreset()
 {
-    //set flash memory
+
+    FLASH_ReadByte(PAGE_ADDR(CONF_DEFAULT_PAGE2), (uint8_t *)LongValue, 640);
+    FLASH_WriteByte(PAGE_ADDR(CONF_PAGE2), (uint8_t *)LongValue, 640);
+	DEBUG("write CONF_DEFAULT_PAGE2 to CONF_PAGE2");
+
+    FLASH_ReadByte(PAGE_ADDR(CONF_DEFAULT_PAGE1), (uint8_t *)ShortValue, 512);
+    FLASH_WriteByte(PAGE_ADDR(CONF_PAGE1), (uint8_t *)ShortValue, 512);
+	DEBUG("write CONF_DEFAULT_PAGE1 to CONF_PAGE1");
+	
     clear_flash_tag();
     init();
     //printf("Reset to Factory Defaults.\r\n");
@@ -1155,101 +1493,109 @@ void command_parse() {
         cmd_key_num = i;
     }
     //printf("\n");
-    if(!strncmp(g_tokens[0],"HELP",strlen(g_tokens[0])))
+    if(!strcmp(g_tokens[0],"HELP"))
     {
         cmd_id = HELP;
     }
-    else if(!strncmp(g_tokens[0],"INFO",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"INFO"))
     {
         cmd_id = INFO;
     }
-    else if(!strncmp(g_tokens[0],"DUMP",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"DUMP"))
     {
         cmd_id = DUMP;
     }
-    else if(!strncmp(g_tokens[0],"I2CREAD",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"I2CREAD"))
     {
         cmd_id = I2CREAD;
     }
-    else if(!strncmp(g_tokens[0],"I2CWRITE",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"I2CWRITE"))
     {
         cmd_id = I2CWRITE;
     }
-    else if(!strncmp(g_tokens[0],"BLSETBRIGHTNESS",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"BLSETBRIGHTNESS"))
     {
         cmd_id = BLSETBRIGHTNESS;
     }
-    else if(!strncmp(g_tokens[0],"BLSETRATIOS",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"BLSETRATIOS"))
     {
         cmd_id = BLSETRATIOS;
     }
-    else if(!strncmp(g_tokens[0],"BLSWITCH",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"BLSWITCH"))
     {
         cmd_id = BLSWITCH;
     }
-    else if(!strncmp(g_tokens[0],"SET2DCTRLMODE",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"SET2DCTRLMODE"))
     {
         cmd_id = SET2DCTRLMODE;
     }
-    else if(!strncmp(g_tokens[0],"BLSETPWM",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"BLSETPWM"))
     {
         cmd_id = BLSETPWM;
     }
-    else if(!strncmp(g_tokens[0],"BLSETTINGSGET",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"BLSETTINGSGET"))
     {
         cmd_id = BLSETTINGSGET;
     }
-    else if(!strncmp(g_tokens[0],"BLSET2DCURRENT",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"BLSET2DCURRENT"))
     {
         cmd_id = BLSET2DCURRENT;
     }
-    else if(!strncmp(g_tokens[0],"BLSET3DCURRENT",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"BLSET3DCURRENT"))
     {
         cmd_id = BLSET3DCURRENT;
     }
-    else if(!strncmp(g_tokens[0],"POKE32",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"POKE32"))
     {
         cmd_id = POKE32;
     }
-    else if(!strncmp(g_tokens[0],"POKE16",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"POKE16"))
     {
         cmd_id = POKE16;
     }
-    else if(!strncmp(g_tokens[0],"POKE8",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"POKE8"))
     {
         cmd_id = POKE8;
     }
-    else if(!strncmp(g_tokens[0],"PEEK32",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"PEEK32"))
     {
         cmd_id = PEEK32;
     }
-    else if(!strncmp(g_tokens[0],"PEEK16",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"PEEK16"))
     {
         cmd_id = PEEK16;
     }
-    else if(!strncmp(g_tokens[0],"PEEK8",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"PEEK8"))
     {
         cmd_id = PEEK8;
     }
-    else if(!strncmp(g_tokens[0],"GPIOREAD",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"GPIOREAD"))
     {
         cmd_id = GPIOREAD;
     }
-    else if(!strncmp(g_tokens[0],"GPIOREADPIN",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"GPIOREADPIN"))
     {
         cmd_id = GPIOREADPIN;
     }
-    else if(!strncmp(g_tokens[0],"GPIOSETPIN",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"GPIOSETPIN"))
     {
         cmd_id = GPIOSETPIN;
     }
-    else if(!strncmp(g_tokens[0],"GPIOCLRPIN",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"GPIOCLRPIN"))
     {
         cmd_id = GPIOCLRPIN;
     }
-    else if(!strncmp(g_tokens[0],"BLFACTORYRESET",strlen(g_tokens[0])))
+    else if(!strcmp(g_tokens[0],"BLFACTORYRESET"))
     {
         cmd_id = BLFACTORYRESET;
+    }
+    else if(!strcmp(g_tokens[0],"setDisplayConfig"))
+    {
+        cmd_id = setDisplayConfig;
+    }
+    else if(!strcmp(g_tokens[0],"getDisplayConfig"))
+    {
+        cmd_id = getDisplayConfig;
     }
     else
     {
@@ -1576,6 +1922,20 @@ void handle_command()
             clear_cmd_info();
             result_suffix(0);
             break; 
+        }
+        case setDisplayConfig:
+        {
+            ret = set_config();
+            clear_cmd_info();
+            result_suffix(ret);
+            break;
+        }
+        case getDisplayConfig:
+        {
+            ret = display_config();
+            clear_cmd_info();
+            result_suffix(ret);
+            break;
         }
         case BLFACTORYRESET:
         {
